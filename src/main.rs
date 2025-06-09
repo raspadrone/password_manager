@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,6 +16,11 @@ use tokio::net::TcpListener;
 #[derive(Deserialize, Serialize, Debug)]
 struct PasswordEntry {
     key: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct PasswordEntryUpdate {
     value: String,
 }
 
@@ -37,6 +42,7 @@ async fn main() {
         // GET password
         .route("/passwords/:key", get(get_password_handler))
         .route("/passwords/:key", delete(delete_password_handler))
+        .route("/passwords/:key", put(update_password_handler))
         // Pass the shared state to the router
         .with_state(store);
 
@@ -95,11 +101,7 @@ async fn get_password_handler(
     let map = store.try_lock().unwrap();
     // get from HashMap
     match map.get(&key) {
-        Some(pass) => (
-            StatusCode::FOUND,
-            format!("Found password '{}'", pass),
-        )
-            .into_response(),
+        Some(pass) => (StatusCode::FOUND, format!("Found password '{}'", pass)).into_response(),
         None => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
     }
 }
@@ -118,5 +120,26 @@ async fn delete_password_handler(
         )
             .into_response(),
         None => (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response(),
+    }
+}
+
+async fn update_password_handler(
+    State(store): State<AppStore>,
+    Path(key): Path<String>,
+    Json(payload): Json<PasswordEntryUpdate>,
+) -> impl IntoResponse {
+    let mut map = store.try_lock().unwrap();
+    
+    match map.insert(key.clone(), payload.value.clone()) {
+        Some(old_val) => ( // if key had pass value, update
+            StatusCode::OK,
+            format!("Password {old_val} for key '{key}' updated."),
+        )
+            .into_response(),
+        None => ( // else create new pass value
+            StatusCode::CREATED,
+            "Password created for {key}".to_string(),
+        )
+            .into_response(),
     }
 }

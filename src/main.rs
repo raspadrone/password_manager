@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -12,6 +12,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::net::TcpListener;
+
+#[derive(Deserialize, Serialize, Debug)]
+struct PasswordEntry {
+    key: String,
+    value: String,
+}
+
+type AppStore = Arc<Mutex<HashMap<String, String>>>;
 
 #[tokio::main]
 async fn main() {
@@ -26,8 +34,10 @@ async fn main() {
         .route("/register", post(register_handler))
         // Add the new /passwords route for POST
         .route("/passwords", post(create_password_handler))
+        // GET password
+        .route("/passwords/:key", get(get_password_handler))
         // Pass the shared state to the router
-        .with_state(store); 
+        .with_state(store);
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -51,14 +61,14 @@ async fn register_handler(Json(payload): Json<RegisterRequest>) -> String {
         payload.password.len()
     )
 }
-
+// curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
     State(store): State<AppStore>,      // Extract the shared store
     Json(payload): Json<PasswordEntry>, // Extract the JSON request body
 ) -> impl IntoResponse {
     // Handlers can return anything that implements IntoResponse
     // Acquire a lock on the mutex to safely access the HashMap
-    let mut map = store.lock().unwrap(); 
+    let mut map = store.lock().unwrap();
 
     // Check if the key already exists (optional, but good practice for "create")
     if map.contains_key(&payload.key) {
@@ -76,10 +86,15 @@ async fn create_password_handler(
         .into_response()
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-struct PasswordEntry {
-    key: String,
-    value: String,
+async fn get_password_handler(
+    State(store): State<AppStore>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    // acquire lock: get a lock on your store
+    let map = store.try_lock().unwrap();
+    // get from HashMap
+    match map.get(&key) {
+        Some(key) => (StatusCode::FOUND, format!("Found key '{}'", key)).into_response(),
+        None => (StatusCode::NOT_FOUND, format!("Key not found")).into_response(),
+    }
 }
-
-type AppStore = Arc<Mutex<HashMap<String, String>>>;

@@ -27,7 +27,7 @@ async fn main() {
         // Add the new /passwords route for POST
         .route("/passwords", post(create_password_handler))
         // Pass the shared state to the router
-        .with_state(store); // <-- IMPORTANT: Pass state here
+        .with_state(store); 
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -58,7 +58,7 @@ async fn create_password_handler(
 ) -> impl IntoResponse {
     // Handlers can return anything that implements IntoResponse
     // Acquire a lock on the mutex to safely access the HashMap
-    let mut map = store.lock().unwrap(); // `.unwrap()` for simplicity for now
+    let mut map = store.lock().unwrap(); 
 
     // Check if the key already exists (optional, but good practice for "create")
     if map.contains_key(&payload.key) {

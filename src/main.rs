@@ -94,7 +94,7 @@ async fn get_password_handler(
     let map = store.try_lock().unwrap();
     // get from HashMap
     match map.get(&key) {
-        Some(key) => (StatusCode::FOUND, format!("Found key '{}'", key)).into_response(),
-        None => (StatusCode::NOT_FOUND, format!("Key not found")).into_response(),
+        Some(pass) => (StatusCode::FOUND, format!("Found password '{}'", pass.clone())).into_response(),
+        None => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
     }
 }

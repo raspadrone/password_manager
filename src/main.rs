@@ -98,10 +98,10 @@ async fn get_password_handler(
     Path(key): Path<String>,
 ) -> impl IntoResponse {
     // acquire lock: get a lock on your store
-    let map = store.try_lock().unwrap();
+    let map = store.lock().unwrap();
     // get from HashMap
     match map.get(&key) {
-        Some(pass) => (StatusCode::FOUND, format!("Found password '{}'", pass)).into_response(),
+        Some(pass) => (StatusCode::OK, format!("Found password '{}'", pass)).into_response(),
         None => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
     }
 }
@@ -111,7 +111,7 @@ async fn delete_password_handler(
     Path(key): Path<String>,
 ) -> impl IntoResponse {
     // Acquire Lock: Get a lock on your store's Mutex.
-    let mut map = store.try_lock().unwrap();
+    let mut map = store.lock().unwrap();
     // Remove from HashMap: Use map.remove(&key). This returns an Option<String> (the removed value if found).
     match map.remove(&key) {
         Some(removed_val) => (
@@ -128,7 +128,7 @@ async fn update_password_handler(
     Path(key): Path<String>,
     Json(payload): Json<PasswordEntryUpdate>,
 ) -> impl IntoResponse {
-    let mut map = store.try_lock().unwrap();
+    let mut map = store.lock().unwrap();
     
     match map.insert(key.clone(), payload.value.clone()) {
         Some(old_val) => ( // if key had pass value, update

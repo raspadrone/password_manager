@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +36,7 @@ async fn main() {
         .route("/passwords", post(create_password_handler))
         // GET password
         .route("/passwords/:key", get(get_password_handler))
+        .route("/passwords/:key", delete(delete_password_handler))
         // Pass the shared state to the router
         .with_state(store);
 
@@ -94,7 +95,28 @@ async fn get_password_handler(
     let map = store.try_lock().unwrap();
     // get from HashMap
     match map.get(&key) {
-        Some(pass) => (StatusCode::FOUND, format!("Found password '{}'", pass.clone())).into_response(),
+        Some(pass) => (
+            StatusCode::FOUND,
+            format!("Found password '{}'", pass),
+        )
+            .into_response(),
         None => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
+    }
+}
+
+async fn delete_password_handler(
+    State(store): State<AppStore>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    // Acquire Lock: Get a lock on your store's Mutex.
+    let mut map = store.try_lock().unwrap();
+    // Remove from HashMap: Use map.remove(&key). This returns an Option<String> (the removed value if found).
+    match map.remove(&key) {
+        Some(removed_val) => (
+            StatusCode::OK,
+            format!("Password {removed_val} for key '{key}' deleted."),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response(),
     }
 }

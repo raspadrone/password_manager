@@ -93,6 +93,7 @@ async fn create_password_handler(
         .into_response()
 }
 
+// curl http://127.0.0.1:3000/passwords/my_app_login
 async fn get_password_handler(
     State(store): State<AppStore>,
     Path(key): Path<String>,
@@ -106,6 +107,7 @@ async fn get_password_handler(
     }
 }
 
+// curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
 async fn delete_password_handler(
     State(store): State<AppStore>,
     Path(key): Path<String>,
@@ -123,6 +125,7 @@ async fn delete_password_handler(
     }
 }
 
+// curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
 async fn update_password_handler(
     State(store): State<AppStore>,
     Path(key): Path<String>,

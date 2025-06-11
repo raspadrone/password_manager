@@ -60,7 +60,7 @@ async fn main() {
         .route("/passwords", post(create_password_handler))
         // GET password
         .route("/passwords/:key", get(get_password_handler))
-        // .route("/passwords/:key", delete(delete_password_handler))
+        .route("/passwords/:key", delete(delete_password_handler))
         // .route("/passwords/:key", put(update_password_handler))
         // Pass the shared state to the router
         .with_state(pool.clone());
@@ -154,23 +154,30 @@ async fn get_password_handler(
     }
 }
 
-// // curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
-// async fn delete_password_handler(
-//     State(store): State<AppStore>,
-//     Path(key): Path<String>,
-// ) -> impl IntoResponse {
-//     // Acquire Lock: Get a lock on your store's Mutex.
-//     let mut map = store.lock().unwrap();
-//     // Remove from HashMap: Use map.remove(&key). This returns an Option<String> (the removed value if found).
-//     match map.remove(&key) {
-//         Some(removed_val) => (
-//             StatusCode::OK,
-//             format!("Password {removed_val} for key '{key}' deleted."),
-//         )
-//             .into_response(),
-//         None => (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response(),
-//     }
-// }
+// curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
+async fn delete_password_handler(
+    State(store): State<AppStore>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    let result = sqlx::query!("DELETE FROM passwords WHERE key = $1", key)
+        .execute(&store)
+        .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() > 0 {
+                (StatusCode::OK, format!("Password for key '{key}' deleted.")).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            eprintln!("Internal error: {e}"),
+        )
+            .into_response(),
+    }
+}
 
 // // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
 // async fn update_password_handler(

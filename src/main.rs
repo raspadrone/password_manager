@@ -8,14 +8,7 @@ use axum::{
 use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, query, query_as};
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    env,
-    net::SocketAddr,
-    process,
-    sync::{Arc, Mutex},
-};
+use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -61,7 +54,7 @@ async fn main() {
         // GET password
         .route("/passwords/:key", get(get_password_handler))
         .route("/passwords/:key", delete(delete_password_handler))
-        // .route("/passwords/:key", put(update_password_handler))
+        .route("/passwords/:key", put(update_password_handler))
         // Pass the shared state to the router
         .with_state(pool.clone());
 
@@ -146,11 +139,14 @@ async fn get_password_handler(
     match result {
         Ok(Some(r)) => (StatusCode::OK, format!("Found password '{}'", r.value)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            eprintln!("Internal error: {e}"),
-        )
-            .into_response(),
+        Err(e) => {
+            eprintln!("Internal error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -171,34 +167,46 @@ async fn delete_password_handler(
                 (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            eprintln!("Internal error: {e}"),
-        )
-            .into_response(),
+        Err(e) => {
+            eprintln!("Internal error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+                .into_response()
+        }
     }
 }
 
-// // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
-// async fn update_password_handler(
-//     State(store): State<AppStore>,
-//     Path(key): Path<String>,
-//     Json(payload): Json<PasswordEntryUpdate>,
-// ) -> impl IntoResponse {
-//     let mut map = store.lock().unwrap();
+// curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
+async fn update_password_handler(
+    State(store): State<AppStore>,
+    Path(key): Path<String>,
+    Json(payload): Json<PasswordEntryUpdate>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        "UPDATE passwords SET value = $1, updated_at = NOW() WHERE key = $2",
+        payload.value,
+        key
+    )
+    .execute(&store)
+    .await;
 
-//     match map.insert(key.clone(), payload.value.clone()) {
-//         Some(old_val) => (
-//             // if key had pass value, update
-//             StatusCode::OK,
-//             format!("Password {old_val} for key '{key}' updated."),
-//         )
-//             .into_response(),
-//         None => (
-//             // else create new pass value
-//             StatusCode::CREATED,
-//             "Password created for {key}".to_string(),
-//         )
-//             .into_response(),
-//     }
-// }
+    match result {
+        Ok(res) => {
+            if res.rows_affected() > 0 {
+                (StatusCode::OK, format!("Password for key '{key}' updated.")).into_response()
+            } else {
+                (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
+            }
+        }
+        Err(e) => {
+            eprintln!("Internal error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+                .into_response()
+        }
+    }
+}

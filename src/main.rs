@@ -1,3 +1,5 @@
+use argon2::PasswordHasher;
+use argon2::{Argon2, password_hash::SaltString};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -6,6 +8,7 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use dotenvy::dotenv;
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, query, query_as};
 use std::{borrow::Cow, env, net::SocketAddr, process};
@@ -77,14 +80,70 @@ struct PasswordValue {
     value: String,
 }
 
-async fn register_handler(Json(payload): Json<RegisterRequest>) -> String {
-    println!("Received registration request: {:?}", payload);
-    format!(
-        "User '{}' registered (dummy): Password length {}",
+// async fn register_handler(Json(payload): Json<RegisterRequest>) -> String {
+//     println!("Received registration request: {:?}", payload);
+//     format!(
+//         "User '{}' registered (dummy): Password length {}",
+//         payload.username,
+//         payload.password.len()
+//     )
+// }
+
+async fn register_handler(
+    State(store): State<PgPool>, // Now takes PgPool
+    Json(payload): Json<RegisterRequest>,
+) -> impl IntoResponse {
+    // 1. Hash the password
+    let password = payload.password.as_bytes();
+    let salt = SaltString::generate(&mut OsRng); // Generate a new random salt
+    let argon2 = Argon2::default();
+
+    let hashed_password = match argon2.hash_password(password, &salt) {
+        // Call hash_password on the argon2 instance
+        Ok(hash) => hash.to_string(), // Convert the PasswordHash object to a String
+        Err(e) => {
+            eprintln!("Error hashing password: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to hash password.".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Store user in database
+    let result = sqlx::query!(
+        "INSERT INTO users (username, hashed_password) VALUES ($1, $2)",
         payload.username,
-        payload.password.len()
+        hashed_password
     )
+    .execute(&store)
+    .await;
+
+    match result {
+        Ok(_) => (
+            StatusCode::CREATED,
+            format!("User '{}' registered successfully.", payload.username),
+        )
+            .into_response(),
+        Err(e) => {
+            if let Some(db_err) = e.as_database_error() {
+                if db_err.code() == Some(Cow::Borrowed("23505")) {
+                    // Unique violation for username
+                    return (StatusCode::CONFLICT, "Username already exists".to_string())
+                        .into_response();
+                }
+            }
+            eprintln!("Database error during user registration: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to register user due to database error.".to_string(),
+            )
+                .into_response()
+        }
+    }
 }
+
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
     State(store): State<AppStore>,      // Extract the shared store

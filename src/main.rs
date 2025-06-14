@@ -10,6 +10,7 @@ use axum::{
 use dotenvy::dotenv;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use sqlx::types::uuid;
 use sqlx::{PgPool, query, query_as};
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
@@ -26,6 +27,37 @@ struct PasswordEntryUpdate {
 }
 
 type AppStore = PgPool;
+
+// NEW: Hardcoded JWT Secret (replace with env var in real app)
+const JWT_SECRET: &[u8] = b"your-super-secret-jwt-key-please-change-me";
+
+// NEW: Struct to map database user row
+#[derive(sqlx::FromRow, Debug)]
+struct DbUser {
+    id: uuid::Uuid, // Assuming UUID primary key
+    username: String,
+    hashed_password: String,
+}
+
+// NEW: Struct for JWT claims
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String, // User ID or username
+    exp: i64,    // Expiration time (as Unix timestamp)
+}
+
+// NEW: Login Request DTO
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+// NEW: Login Response DTO
+#[derive(Serialize)]
+struct LoginResponse {
+    token: String,
+}
 
 #[tokio::main]
 async fn main() {

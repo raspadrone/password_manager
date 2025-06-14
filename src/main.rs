@@ -1,5 +1,6 @@
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
+use axum::response::Response;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -59,6 +60,34 @@ struct LoginRequest {
 #[derive(Serialize)]
 struct LoginResponse {
     token: String,
+}
+
+enum AuthError {
+    MissingToken,
+    InvalidToken,
+    ExpiredToken,
+    UserNotFound, // Potentially from DB lookup inside middleware (though we'll use extensions for simplicity here)
+    // Add other specific errors as needed
+    InternalServerError, // Catch-all for unexpected errors
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let (status, error_message) = match self {
+            AuthError::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                "Authorization token missing".to_string(),
+            ),
+            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
+            AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
+            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
+            AuthError::InternalServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
+        };
+        (status, Json(serde_json::json!({"error": error_message}))).into_response()
+    }
 }
 
 #[tokio::main]

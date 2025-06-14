@@ -1,5 +1,5 @@
-use argon2::PasswordHasher;
 use argon2::{Argon2, password_hash::SaltString};
+use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -7,7 +7,9 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
+use chrono::{Duration, Utc};
 use dotenvy::dotenv;
+use jsonwebtoken::{EncodingKey, Header, encode};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::types::uuid;
@@ -84,6 +86,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(hello_handler))
         .route("/register", post(register_handler))
+        .route("/login", post(login_handler))
         // Add the new /passwords route for POST
         .route("/passwords", post(create_password_handler))
         // GET password
@@ -300,4 +303,85 @@ async fn update_password_handler(
                 .into_response()
         }
     }
+}
+
+// NEW HANDLER: POST /login
+async fn login_handler(
+    State(store): State<PgPool>,
+    Json(payload): Json<LoginRequest>,
+) -> impl IntoResponse {
+    // 1. Retrieve User from DB
+    let user = sqlx::query_as!(
+        DbUser,
+        "SELECT id, username, hashed_password FROM users WHERE username = $1",
+        payload.username
+    )
+    .fetch_optional(&store)
+    .await;
+
+    let user = match user {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()).into_response();
+        }
+        Err(e) => {
+            eprintln!("Database error during user retrieval: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Verify Password
+    let parsed_hash = match PasswordHash::new(&user.hashed_password) {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("Error parsing stored password hash: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+                .into_response();
+        }
+    };
+    let argon2 = Argon2::default(); // Ensure Argon2 is initialized here if not global
+
+    let password_verified = match argon2.verify_password(payload.password.as_bytes(), &parsed_hash)
+    {
+        Ok(_) => true,
+        Err(_) => false, // Verification failed
+    };
+
+    if !password_verified {
+        return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()).into_response();
+    }
+
+    // 3. Generate JWT
+    let now = Utc::now();
+    let expiration = (now + Duration::hours(1)).timestamp(); // Token expires in 1 hour
+
+    let claims = Claims {
+        sub: user.id.to_string(), // Use user ID as subject
+        exp: expiration,
+    };
+
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(JWT_SECRET),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error encoding JWT: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to generate token".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(LoginResponse { token })).into_response()
 }

@@ -1,7 +1,7 @@
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::body::Body;
-use axum::http::{header, Request};
+use axum::http::{Request, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::{
@@ -15,16 +15,14 @@ use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::{Authorization, HeaderMapExt};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
-use jsonwebtoken::{EncodingKey, Header, encode, DecodingKey, Validation, decode, };
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::types::uuid;
 use sqlx::{PgPool, query, query_as};
-use uuid::Uuid;
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
-
-
+use uuid::Uuid;
 
 #[derive(Deserialize, Serialize, Debug)]
 struct PasswordEntry {
@@ -120,17 +118,33 @@ async fn main() {
         process::exit(1);
     });
     println!("Database migrations applied.");
+    // let app = Router::new()
+    //     .route("/", get(hello_handler))
+    //     .route("/register", post(register_handler))
+    //     .route("/login", post(login_handler))
+    //     // Add the new /passwords route for POST
+    //     .route("/passwords", post(create_password_handler))
+    //     // GET password
+    //     .route("/passwords/:key", get(get_password_handler))
+    //     .route("/passwords/:key", delete(delete_password_handler))
+    //     .route("/passwords/:key", put(update_password_handler))
+    //     // Pass the shared state to the router
+    //     .with_state(pool.clone());
     let app = Router::new()
         .route("/", get(hello_handler))
         .route("/register", post(register_handler))
         .route("/login", post(login_handler))
-        // Add the new /passwords route for POST
-        .route("/passwords", post(create_password_handler))
-        // GET password
-        .route("/passwords/:key", get(get_password_handler))
-        .route("/passwords/:key", delete(delete_password_handler))
-        .route("/passwords/:key", put(update_password_handler))
-        // Pass the shared state to the router
+        // Protect the password routes with the auth_middleware
+        .nest(
+            "/passwords", // All routes nested under /passwords
+            Router::new()
+                .route("/", post(create_password_handler))
+                .route("/:key", get(get_password_handler))
+                .route("/:key", delete(delete_password_handler))
+                .route("/:key", put(update_password_handler))
+                // Apply the middleware as a layer here
+                .layer(axum::middleware::from_fn_with_state(pool.clone(), auth_middleware)),
+        )
         .with_state(pool.clone());
 
     let listener = TcpListener::bind(addr).await.unwrap();
@@ -423,14 +437,13 @@ async fn login_handler(
     (StatusCode::OK, Json(LoginResponse { token })).into_response()
 }
 
-
 // NEW: Authentication Middleware
 async fn auth_middleware(
     // State is passed to middleware if needed (e.g., database pool)
     State(_store): State<PgPool>, // _pool if not used directly here
-    headers: header::HeaderMap, // Get all headers
-    mut request: Request<Body>, // The incoming request
-    next: Next, // The next middleware or handler in the chain
+    headers: header::HeaderMap,   // Get all headers
+    mut request: Request<Body>,   // The incoming request
+    next: Next,                   // The next middleware or handler in the chain
 ) -> Result<Response, AuthError> {
     // 1. Extract Authorization header
     let auth_header = headers.typed_get::<Authorization<Bearer>>();

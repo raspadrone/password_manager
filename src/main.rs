@@ -1,5 +1,8 @@
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
+use axum::body::Body;
+use axum::http::{header, Request};
+use axum::middleware::Next;
 use axum::response::Response;
 use axum::{
     Json, Router,
@@ -8,15 +11,20 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
+use axum_extra::headers::authorization::Bearer;
+use axum_extra::headers::{Authorization, HeaderMapExt};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
-use jsonwebtoken::{EncodingKey, Header, encode};
+use jsonwebtoken::{EncodingKey, Header, encode, DecodingKey, Validation, decode, };
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::types::uuid;
 use sqlx::{PgPool, query, query_as};
+use uuid::Uuid;
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
+
+
 
 #[derive(Deserialize, Serialize, Debug)]
 struct PasswordEntry {
@@ -413,4 +421,50 @@ async fn login_handler(
     };
 
     (StatusCode::OK, Json(LoginResponse { token })).into_response()
+}
+
+
+// NEW: Authentication Middleware
+async fn auth_middleware(
+    // State is passed to middleware if needed (e.g., database pool)
+    State(_store): State<PgPool>, // _pool if not used directly here
+    headers: header::HeaderMap, // Get all headers
+    mut request: Request<Body>, // The incoming request
+    next: Next, // The next middleware or handler in the chain
+) -> Result<Response, AuthError> {
+    // 1. Extract Authorization header
+    let auth_header = headers.typed_get::<Authorization<Bearer>>();
+
+    let token = match auth_header {
+        Some(Authorization(bearer)) => bearer.token().to_string(),
+        None => return Err(AuthError::MissingToken), // No token found
+    };
+
+    // 2. Decode and Validate JWT
+    let decoding_key = DecodingKey::from_secret(JWT_SECRET);
+    let validation = Validation::default(); // Default validation (alg, exp etc.)
+
+    let claims = match decode::<Claims>(&token, &decoding_key, &validation) {
+        Ok(token_data) => token_data.claims,
+        Err(e) => {
+            eprintln!("JWT decoding error: {}", e); // Log the specific error for debugging
+            return match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => Err(AuthError::ExpiredToken),
+                _ => Err(AuthError::InvalidToken), // Catch all other JWT errors as invalid
+            };
+        }
+    };
+
+    // 3. Extract User ID from Claims and Store in Request Extensions
+    let user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Invalid UUID in token subject: {}", e);
+            return Err(AuthError::InvalidToken); // Malformed user ID in token
+        }
+    };
+    request.extensions_mut().insert(user_id); // Store the Uuid directly
+
+    // 4. Proceed to the next handler/middleware
+    Ok(next.run(request).await)
 }

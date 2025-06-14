@@ -22,3 +22,4 @@ CREATE OR REPLACE TRIGGER update_passwords_updated_at
     BEFORE UPDATE ON passwords
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+

@@ -1,5 +1,6 @@
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
+use axum::Extension;
 use axum::body::Body;
 use axum::http::{Request, header};
 use axum::middleware::Next;
@@ -143,7 +144,10 @@ async fn main() {
                 .route("/:key", delete(delete_password_handler))
                 .route("/:key", put(update_password_handler))
                 // Apply the middleware as a layer here
-                .layer(axum::middleware::from_fn_with_state(pool.clone(), auth_middleware)),
+                .layer(axum::middleware::from_fn_with_state(
+                    pool.clone(),
+                    auth_middleware,
+                )),
         )
         .with_state(pool.clone());
 
@@ -233,12 +237,14 @@ async fn register_handler(
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
     State(store): State<AppStore>,      // Extract the shared store
+    Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // Extract the JSON request body
 ) -> impl IntoResponse {
     let result = query!(
-        "INSERT INTO passwords (key, value) VALUES ($1, $2)",
+        "INSERT INTO passwords (key, value, user_id) VALUES ($1, $2, $3)",
         payload.key,
-        payload.value // No need to clone, sqlx takes ownership/reference appropriately
+        payload.value, // No need to clone, sqlx takes ownership/reference appropriately
+        auth_user_id
     )
     .execute(&store) // Execute the query on the pool
     .await; // Await the async operation
@@ -271,12 +277,14 @@ async fn create_password_handler(
 // curl http://127.0.0.1:3000/passwords/my_app_login
 async fn get_password_handler(
     State(store): State<AppStore>,
+    Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
     let result = query_as!(
         PasswordValue,
-        "SELECT value FROM passwords WHERE key = $1",
-        key
+        "SELECT value FROM passwords WHERE key = $1 AND user_id = $2",
+        key,
+        auth_user_id
     )
     .fetch_optional(&store)
     .await;
@@ -298,11 +306,16 @@ async fn get_password_handler(
 // curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
 async fn delete_password_handler(
     State(store): State<AppStore>,
+    Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!("DELETE FROM passwords WHERE key = $1", key)
-        .execute(&store)
-        .await;
+    let result = sqlx::query!(
+        "DELETE FROM passwords WHERE key = $1 AND user_id = $2",
+        key,
+        auth_user_id
+    )
+    .execute(&store)
+    .await;
 
     match result {
         Ok(res) => {
@@ -327,12 +340,14 @@ async fn delete_password_handler(
 async fn update_password_handler(
     State(store): State<AppStore>,
     Path(key): Path<String>,
+    Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntryUpdate>,
 ) -> impl IntoResponse {
     let result = sqlx::query!(
-        "UPDATE passwords SET value = $1, updated_at = NOW() WHERE key = $2",
+        "UPDATE passwords SET value = $1, updated_at = NOW() WHERE key = $2 AND user_id = $3",
         payload.value,
-        key
+        key,
+        auth_user_id
     )
     .execute(&store)
     .await;

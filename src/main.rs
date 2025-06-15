@@ -84,24 +84,24 @@ enum AuthError {
     InternalServerError, // Catch-all for unexpected errors
 }
 
-impl IntoResponse for AuthError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AuthError::MissingToken => (
-                StatusCode::UNAUTHORIZED,
-                "Authorization token missing".to_string(),
-            ),
-            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
-            AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
-            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
-            AuthError::InternalServerError => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            ),
-        };
-        (status, Json(serde_json::json!({"error": error_message}))).into_response()
-    }
-}
+// impl IntoResponse for AuthError {
+//     fn into_response(self) -> Response {
+//         let (status, error_message) = match self {
+//             AuthError::MissingToken => (
+//                 StatusCode::UNAUTHORIZED,
+//                 "Authorization token missing".to_string(),
+//             ),
+//             AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
+//             AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
+//             AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
+//             AuthError::InternalServerError => (
+//                 StatusCode::INTERNAL_SERVER_ERROR,
+//                 "Internal server error".to_string(),
+//             ),
+//         };
+//         (status, Json(serde_json::json!({"error": error_message}))).into_response()
+//     }
+// }
 
 #[derive(Deserialize)]
 struct GeneratePasswordRequest {
@@ -117,6 +117,37 @@ struct GeneratePasswordRequest {
 
 fn default_password_length() -> u8 {
     12 // Default length
+}
+
+// NEW: Global API Error structure for consistent responses
+#[derive(Serialize)]
+struct ApiError {
+    error: String,
+    code: u16,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let (status, error_message) = match self {
+            AuthError::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                "Authorization token missing".to_string(),
+            ),
+            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
+            AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
+            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
+            AuthError::InternalServerError => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
+        };
+        // Refactored to return Json(ApiError)
+        Json(ApiError {
+            error: error_message,
+            code: status.as_u16(),
+        })
+        .into_response()
+    }
 }
 
 #[tokio::main]
@@ -216,11 +247,11 @@ async fn register_handler(
         Ok(hash) => hash.to_string(), // Convert the PasswordHash object to a String
         Err(e) => {
             eprintln!("Error hashing password: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to hash password.".to_string(),
-            )
-                .into_response();
+            return Json(ApiError {
+                error: "Failed to hash password.".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
         }
     };
 
@@ -243,16 +274,19 @@ async fn register_handler(
             if let Some(db_err) = e.as_database_error() {
                 if db_err.code() == Some(Cow::Borrowed("23505")) {
                     // Unique violation for username
-                    return (StatusCode::CONFLICT, "Username already exists".to_string())
-                        .into_response();
+                    return Json(ApiError {
+                        error: "Username already exists".to_string(),
+                        code: StatusCode::CONFLICT.as_u16(),
+                    })
+                    .into_response();
                 }
             }
             eprintln!("Database error during user registration: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to register user due to database error.".to_string(),
-            )
-                .into_response()
+            Json(ApiError {
+                error: "Failed to register user due to database error.".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response()
         }
     }
 }
@@ -283,16 +317,20 @@ async fn create_password_handler(
             if let Some(db_err) = e.as_database_error() {
                 if db_err.code() == Some(Cow::Borrowed("23505")) {
                     // '23505' is common for unique_violation
-                    return (StatusCode::CONFLICT, "Key already exists".to_string())
-                        .into_response();
+                    return Json(ApiError {
+                        error: "Key already exists".to_string(),
+                        code: StatusCode::CONFLICT.as_u16(),
+                    })
+                    .into_response();
                 }
             }
             eprintln!("Database error during password creation: {}", e); // Log the error for debugging
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create password due to database error.".to_string(),
-            )
-                .into_response()
+
+            Json(ApiError {
+                error: "Failed to create password due to database error.".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response()
         }
     }
 }
@@ -317,11 +355,11 @@ async fn get_password_handler(
         Ok(None) => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
         Err(e) => {
             eprintln!("Internal error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response()
+            Json(ApiError {
+                error: "Internal server error".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response()
         }
     }
 }
@@ -350,11 +388,11 @@ async fn delete_password_handler(
         }
         Err(e) => {
             eprintln!("Internal error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response()
+            Json(ApiError {
+                error: "Internal server error".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response()
         }
     }
 }
@@ -385,11 +423,11 @@ async fn update_password_handler(
         }
         Err(e) => {
             eprintln!("Internal error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response()
+            Json(ApiError {
+                error: "Internal server error".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response()
         }
     }
 }
@@ -415,11 +453,11 @@ async fn login_handler(
         }
         Err(e) => {
             eprintln!("Database error during user retrieval: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database error".to_string(),
-            )
-                .into_response();
+            return Json(ApiError {
+                error: "Database error".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
         }
     };
 
@@ -428,11 +466,11 @@ async fn login_handler(
         Ok(hash) => hash,
         Err(e) => {
             eprintln!("Error parsing stored password hash: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-                .into_response();
+            return Json(ApiError {
+                error: "Internal server error".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
         }
     };
     let argon2 = Argon2::default(); // Ensure Argon2 is initialized here if not global
@@ -444,7 +482,11 @@ async fn login_handler(
     };
 
     if !password_verified {
-        return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()).into_response();
+        return Json(ApiError {
+            error: "Invalid credentials".to_string(),
+            code: StatusCode::UNAUTHORIZED.as_u16(),
+        })
+        .into_response();
     }
 
     // 3. Generate JWT
@@ -464,11 +506,11 @@ async fn login_handler(
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error encoding JWT: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to generate token".to_string(),
-            )
-                .into_response();
+            return Json(ApiError {
+                error: "Failed to generate token".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
         }
     };
 

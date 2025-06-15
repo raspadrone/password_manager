@@ -1,5 +1,6 @@
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
+use axum::extract::Query;
 use axum::Extension;
 use axum::body::Body;
 use axum::http::{Request, header};
@@ -17,8 +18,11 @@ use axum_extra::headers::{Authorization, HeaderMapExt};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use rand::seq::{IndexedRandom, SliceRandom};
+use rand::{rng, thread_rng};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::types::uuid;
 use sqlx::{PgPool, query, query_as};
 use std::{borrow::Cow, env, net::SocketAddr, process};
@@ -97,12 +101,65 @@ impl IntoResponse for AuthError {
     }
 }
 
+#[derive(Deserialize)]
 struct GeneratePasswordRequest {
-    length: u8, 
-    include_uppercase: bool, 
-    include_numbers: bool, 
-    include_symbols: bool
-} 
+    #[serde(default = "default_password_length")]
+    length: u8,
+    #[serde(default)]
+    include_uppercase: bool,
+    #[serde(default)]
+    include_numbers: bool,
+    #[serde(default)]
+    include_symbols: bool,
+}
+
+fn default_password_length() -> u8 {
+    12 // Default length
+}
+
+async fn generate_password_handler(
+    Query(params): Query<GeneratePasswordRequest>,
+) -> impl IntoResponse {
+    let mut rng = rng();
+    let mut password_chars = Vec::new();
+
+    let lowercase_chars: Vec<char> = ('a'..='z').collect();
+    let uppercase_chars: Vec<char> = ('A'..='Z').collect();
+    let number_chars: Vec<char> = ('0'..='9').collect();
+    let symbol_chars: Vec<char> = "!@#$%^&*()_+-=[]{}|;:,.<>?".chars().collect();
+
+    let mut char_set: Vec<char> = lowercase_chars.clone(); // Always include lowercase
+
+    // Ensure at least one of each requested type, and add to the general pool
+    if params.include_uppercase {
+        char_set.extend(&uppercase_chars);
+        password_chars.push(*uppercase_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+    if params.include_numbers {
+        char_set.extend(&number_chars);
+        password_chars.push(*number_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+    if params.include_symbols {
+        char_set.extend(&symbol_chars);
+        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+
+    if char_set.is_empty() { // Fallback if no specific sets are chosen (shouldn't happen with default lowercase)
+        char_set.extend(lowercase_chars);
+    }
+
+    // Fill the rest of the password length
+    let remaining_length = params.length.saturating_sub(password_chars.len() as u8); // Avoid underflow
+    for _ in 0..remaining_length {
+        password_chars.push(*char_set.choose(&mut rng).unwrap());
+    }
+
+    password_chars.shuffle(&mut rng); // Shuffle to randomize order
+
+    let generated_password: String = password_chars.iter().collect();
+
+    (StatusCode::OK, Json(json!({"password": generated_password}))).into_response()
+}
 
 #[tokio::main]
 async fn main() {

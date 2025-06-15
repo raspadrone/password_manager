@@ -97,6 +97,13 @@ impl IntoResponse for AuthError {
     }
 }
 
+struct GeneratePasswordRequest {
+    length: u8, 
+    include_uppercase: bool, 
+    include_numbers: bool, 
+    include_symbols: bool
+} 
+
 #[tokio::main]
 async fn main() {
     dotenv().ok(); // load DATABASE_URL environment variable

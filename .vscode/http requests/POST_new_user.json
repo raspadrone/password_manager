@@ -1,0 +1,13 @@
+{
+  "body": {
+    "content": "eyAidXNlcm5hbWUiOiAiYWRyaTEiLCAicGFzc3dvcmQiOiAic2VjcmV0X3Bhc3NfYWRyaTEiIH0=",
+    "file": false,
+    "fileSize": false
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "title": "POST new user",
+  "url": "http://127.0.0.1:3000/register"
+}

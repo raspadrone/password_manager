@@ -2,9 +2,9 @@
 
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
-use axum::extract::Query;
 use axum::Extension;
 use axum::body::Body;
+use axum::extract::Query;
 use axum::http::{Request, header};
 use axum::middleware::Next;
 use axum::response::Response;
@@ -20,8 +20,8 @@ use axum_extra::headers::{Authorization, HeaderMapExt};
 use chrono::{Duration, Utc};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::seq::{IndexedRandom, SliceRandom};
 use rand::rng;
+use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -119,50 +119,6 @@ fn default_password_length() -> u8 {
     12 // Default length
 }
 
-async fn generate_password_handler(
-    Query(params): Query<GeneratePasswordRequest>,
-) -> impl IntoResponse {
-    let mut rng = rng();
-    let mut password_chars = Vec::new();
-
-    let lowercase_chars: Vec<char> = ('a'..='z').collect();
-    let uppercase_chars: Vec<char> = ('A'..='Z').collect();
-    let number_chars: Vec<char> = ('0'..='9').collect();
-    let symbol_chars: Vec<char> = "!@#$%^&*()_+-=[]{}|;:,.<>?".chars().collect();
-
-    let mut char_set: Vec<char> = lowercase_chars.clone(); // Always include lowercase
-
-    // Ensure at least one of each requested type, and add to the general pool
-    if params.include_uppercase {
-        char_set.extend(&uppercase_chars);
-        password_chars.push(*uppercase_chars.choose(&mut rng).unwrap()); // Ensure at least one
-    }
-    if params.include_numbers {
-        char_set.extend(&number_chars);
-        password_chars.push(*number_chars.choose(&mut rng).unwrap()); // Ensure at least one
-    }
-    if params.include_symbols {
-        char_set.extend(&symbol_chars);
-        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); // Ensure at least one
-    }
-
-    if char_set.is_empty() { // Fallback if no specific sets are chosen (shouldn't happen with default lowercase)
-        char_set.extend(lowercase_chars);
-    }
-
-    // Fill the rest of the password length
-    let remaining_length = params.length.saturating_sub(password_chars.len() as u8); // Avoid underflow
-    for _ in 0..remaining_length {
-        password_chars.push(*char_set.choose(&mut rng).unwrap());
-    }
-
-    password_chars.shuffle(&mut rng); // Shuffle to randomize order
-
-    let generated_password: String = password_chars.iter().collect();
-
-    (StatusCode::OK, Json(json!({"password": generated_password}))).into_response()
-}
-
 #[tokio::main]
 async fn main() {
     dotenv().ok(); // load DATABASE_URL environment variable
@@ -201,6 +157,7 @@ async fn main() {
         .route("/", get(hello_handler))
         .route("/register", post(register_handler))
         .route("/login", post(login_handler))
+        .route("/generate-password", get(generate_password_handler))
         // Protect the password routes with the auth_middleware
         .nest(
             "/passwords", // All routes nested under /passwords
@@ -302,7 +259,7 @@ async fn register_handler(
 
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
-    State(store): State<AppStore>,      // Extract the shared store
+    State(store): State<AppStore>, // Extract the shared store
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // Extract the JSON request body
 ) -> impl IntoResponse {
@@ -561,4 +518,54 @@ async fn auth_middleware(
 
     // 4. Proceed to the next handler/middleware
     Ok(next.run(request).await)
+}
+
+// curl "http://127.0.0.1:3000/generate-password?length=24&include_uppercase=true&include_numbers=true&include_symbols=true"
+async fn generate_password_handler(
+    Query(params): Query<GeneratePasswordRequest>,
+) -> impl IntoResponse {
+    let mut rng = rng();
+    let mut password_chars = Vec::new();
+
+    let lowercase_chars: Vec<char> = ('a'..='z').collect();
+    let uppercase_chars: Vec<char> = ('A'..='Z').collect();
+    let number_chars: Vec<char> = ('0'..='9').collect();
+    let symbol_chars: Vec<char> = "!@#$%^&*()_+-=[]{}|;:,.<>?".chars().collect();
+
+    let mut char_set: Vec<char> = lowercase_chars.clone(); // Always include lowercase
+
+    // Ensure at least one of each requested type, and add to the general pool
+    if params.include_uppercase {
+        char_set.extend(&uppercase_chars);
+        password_chars.push(*uppercase_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+    if params.include_numbers {
+        char_set.extend(&number_chars);
+        password_chars.push(*number_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+    if params.include_symbols {
+        char_set.extend(&symbol_chars);
+        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); // Ensure at least one
+    }
+
+    if char_set.is_empty() {
+        // Fallback if no specific sets are chosen (shouldn't happen with default lowercase)
+        char_set.extend(lowercase_chars);
+    }
+
+    // Fill the rest of the password length
+    let remaining_length = params.length.saturating_sub(password_chars.len() as u8); // Avoid underflow
+    for _ in 0..remaining_length {
+        password_chars.push(*char_set.choose(&mut rng).unwrap());
+    }
+
+    password_chars.shuffle(&mut rng); // Shuffle to randomize order
+
+    let generated_password: String = password_chars.iter().collect();
+
+    (
+        StatusCode::OK,
+        Json(json!({"password": generated_password})),
+    )
+        .into_response()
 }

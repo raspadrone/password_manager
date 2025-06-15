@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use argon2::{Argon2, password_hash::SaltString};
 use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::extract::Query;
@@ -19,7 +21,7 @@ use chrono::{Duration, Utc};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::seq::{IndexedRandom, SliceRandom};
-use rand::{rng, thread_rng};
+use rand::rng;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

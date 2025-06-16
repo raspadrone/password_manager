@@ -17,7 +17,8 @@ use axum::{
 };
 use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::{Authorization, HeaderMapExt};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
+use diesel::prelude::{Insertable, Queryable};
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::rng;
@@ -30,6 +31,8 @@ use sqlx::{PgPool, query, query_as};
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
 use uuid::Uuid;
+
+mod schema;
 
 #[derive(Deserialize, Serialize, Debug)]
 struct PasswordEntry {
@@ -79,29 +82,10 @@ enum AuthError {
     MissingToken,
     InvalidToken,
     ExpiredToken,
-    UserNotFound, // Potentially from DB lookup inside middleware (though we'll use extensions for simplicity here)
-    // Add other specific errors as needed
+    UserNotFound, 
     InternalServerError, // Catch-all for unexpected errors
 }
 
-// impl IntoResponse for AuthError {
-//     fn into_response(self) -> Response {
-//         let (status, error_message) = match self {
-//             AuthError::MissingToken => (
-//                 StatusCode::UNAUTHORIZED,
-//                 "Authorization token missing".to_string(),
-//             ),
-//             AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
-//             AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
-//             AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
-//             AuthError::InternalServerError => (
-//                 StatusCode::INTERNAL_SERVER_ERROR,
-//                 "Internal server error".to_string(),
-//             ),
-//         };
-//         (status, Json(serde_json::json!({"error": error_message}))).into_response()
-//     }
-// }
 
 #[derive(Deserialize)]
 struct GeneratePasswordRequest {
@@ -148,6 +132,28 @@ impl IntoResponse for AuthError {
         })
         .into_response()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
+#[diesel(table_name = schema::users)] // <-- IMPORTANT: Link to the users table in schema.rs
+// Ensure all fields match schema.rs types precisely.
+pub struct User {
+    pub id: Uuid, 
+    pub username: String,
+    pub hashed_password: String,
+    pub created_at: DateTime<Utc>, // Matches TIMESTAMPTZ
+}
+
+// NEW: Password Model
+#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
+#[diesel(table_name = schema::passwords)] // <-- IMPORTANT: Link to the passwords table in schema.rs
+pub struct Password {
+    pub id: Uuid,
+    pub key: String,
+    pub value: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub user_id: Uuid,
 }
 
 #[tokio::main]

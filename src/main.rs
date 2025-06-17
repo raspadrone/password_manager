@@ -200,6 +200,7 @@ async fn main() {
             "/passwords", // All routes nested under /passwords
             Router::new()
                 .route("/", post(create_password_handler))
+                .route("/", get(get_all_passwords_handler))
                 .route("/:key", get(get_password_handler))
                 .route("/:key", delete(delete_password_handler))
                 .route("/:key", put(update_password_handler))
@@ -339,6 +340,10 @@ async fn create_password_handler(
             .into_response()
         }
     }
+}
+
+async fn get_all_passwords_handler(State(pool): State<PgPool>, Extension(auth_user_id): Extension<Uuid>) -> impl IntoResponse {
+    
 }
 
 // curl http://127.0.0.1:3000/passwords/my_app_login

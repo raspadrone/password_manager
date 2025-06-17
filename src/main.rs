@@ -343,7 +343,29 @@ async fn create_password_handler(
 }
 
 async fn get_all_passwords_handler(State(pool): State<PgPool>, Extension(auth_user_id): Extension<Uuid>) -> impl IntoResponse {
-    
+    /* Use sqlx::query_as! to SELECT id, key, value, created_at, updated_at, user_id FROM passwords WHERE user_id = $1 to retrieve all passwords for the auth_user_id.
+Use .fetch_all(&pool).await to get a Vec<Password>.
+Handle sqlx::Error.
+Return StatusCode::OK with a Json array of Password entries. Remember to derive Serialize for your Password struct if you haven't already. (Your Password model does have Serialize, so that's good). */
+    let result = query_as(Password,
+        "SELECT id, key, value, created_at, updated_at, user_id FROM passwords WHERE user_id = $1",
+        auth_user_id).fetch_all(&pool)
+    .await;
+
+    match result {
+        Ok(passwords) => {
+            // Return 200 OK with the JSON array of passwords
+            (StatusCode::OK, Json(passwords)).into_response()
+        }
+        Err(e) => {
+            eprintln!("Database error retrieving all passwords: {}", e);
+            // Return 500 Internal Server Error with a consistent ApiError format
+            
+                Json(serde_json::json!({"error": "Internal server error retrieving passwords", "code": StatusCode::INTERNAL_SERVER_ERROR.as_u16()}))
+            
+                .into_response()
+        }
+    }
 }
 
 // curl http://127.0.0.1:3000/passwords/my_app_login

@@ -16,9 +16,12 @@ jsonwebtoken = "9.3.1"
 chrono = { version = "0.4.41", features = ["serde"] } # For handling timestamps in JWT claims
 
 axum-extra = { version = "0.10.1", features = ["typed-header"] } # For TypedHeader extractor
-# Make sure uuid has `v4` feature for generation if you use it for user IDs in DB
 uuid = { version = "1.17.0", features = ["v4", "serde"] } # Ensure uuid is updated and has "serde" feature for JSON
 rand = "0.9.1"
 rand_distr = "0.5.1"
-diesel = { version = "2.2.10", features = ["postgres", "uuid", "r2d2", "chrono"] } # ORM framework
-diesel-async = { version = "0.5.2", features = ["tokio", "r2d2"] }      # Async support for Diesel with Tokio
+
+
+diesel = { version = "2.2.10", features = ["postgres", "uuid", "chrono"] }
+diesel-async = { version = "0.5.0", features = ["tokio", "deadpool"] }
+
+deadpool = { version = "0.10.0", features = ["rt_tokio_1"] }

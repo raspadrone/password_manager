@@ -45,10 +45,13 @@ struct PasswordEntryUpdate {
     value: String,
 }
 
-type AppStore = PgPool;
+// type AppStore = PgPool;
 
-// NEW: Hardcoded JWT Secret (replace with env var in real app)
-const JWT_SECRET: &[u8] = b"your-super-secret-jwt-key-please-change-me";
+#[derive(Clone)]
+struct AppState {
+    db_pool: PgPool,
+    jwt_secret: String,
+}
 
 // NEW: Struct to map database user row
 #[derive(sqlx::FromRow, Debug)]
@@ -166,13 +169,15 @@ async fn main() {
 
     // NEW: Initialize PostgreSQL connection pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
-    let pool = PgPool::connect(&database_url).await.unwrap_or_else(|err| {
+    let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set in .env file");
+    let db_pool = PgPool::connect(&database_url).await.unwrap_or_else(|err| {
         eprintln!("Error connecting to database: {}", err);
         process::exit(1);
     });
+    let app_state = AppState { db_pool, jwt_secret };
 
     // Run pending migrations. Important for dev environment.
-    sqlx::migrate!().run(&pool).await.unwrap_or_else(|err| {
+    sqlx::migrate!().run(&app_state.db_pool).await.unwrap_or_else(|err| {
         eprintln!("Error running migrations: {}", err);
         process::exit(1);
     });
@@ -205,11 +210,11 @@ async fn main() {
                 .route("/:key", put(update_password_handler))
                 // Apply the middleware as a layer here
                 .layer(axum::middleware::from_fn_with_state(
-                    pool.clone(),
+                    app_state.clone(),
                     auth_middleware,
                 )),
         )
-        .with_state(pool.clone());
+        .with_state(app_state.clone());
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -240,7 +245,7 @@ struct PasswordValue {
 // }
 
 async fn register_handler(
-    State(store): State<PgPool>, // Now takes PgPool
+    State(store): State<AppState>, // Now takes PgPool
     Json(payload): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     // 1. Hash the password
@@ -267,7 +272,7 @@ async fn register_handler(
         payload.username,
         hashed_password
     )
-    .execute(&store)
+    .execute(&store.db_pool)
     .await;
 
     match result {
@@ -299,7 +304,7 @@ async fn register_handler(
 
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
-    State(store): State<AppStore>, // Extract the shared store
+    State(store): State<AppState>, // Extract the shared store
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // Extract the JSON request body
 ) -> impl IntoResponse {
@@ -309,7 +314,7 @@ async fn create_password_handler(
         payload.value, // No need to clone, sqlx takes ownership/reference appropriately
         auth_user_id
     )
-    .execute(&store) // Execute the query on the pool
+    .execute(&store.db_pool) // Execute the query on the pool
     .await; // Await the async operation
 
     match result {
@@ -342,7 +347,7 @@ async fn create_password_handler(
 }
 
 async fn get_all_passwords_handler(
-    State(store): State<AppStore>,
+    State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
 ) -> impl IntoResponse {
     let result = query_as!(
@@ -350,7 +355,7 @@ async fn get_all_passwords_handler(
         "SELECT id, key, value, created_at, updated_at, user_id FROM passwords WHERE user_id = $1",
         auth_user_id
     )
-    .fetch_all(&store)
+    .fetch_all(&store.db_pool)
     .await;
 
     match result {
@@ -371,7 +376,7 @@ async fn get_all_passwords_handler(
 
 // curl http://127.0.0.1:3000/passwords/my_app_login
 async fn get_password_handler(
-    State(store): State<AppStore>,
+    State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
@@ -381,7 +386,7 @@ async fn get_password_handler(
         key,
         auth_user_id
     )
-    .fetch_optional(&store)
+    .fetch_optional(&store.db_pool)
     .await;
 
     match result {
@@ -400,7 +405,7 @@ async fn get_password_handler(
 
 // curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
 async fn delete_password_handler(
-    State(store): State<AppStore>,
+    State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
@@ -409,7 +414,7 @@ async fn delete_password_handler(
         key,
         auth_user_id
     )
-    .execute(&store)
+    .execute(&store.db_pool)
     .await;
 
     match result {
@@ -433,7 +438,7 @@ async fn delete_password_handler(
 
 // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
 async fn update_password_handler(
-    State(store): State<AppStore>,
+    State(store): State<AppState>,
     Path(key): Path<String>,
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntryUpdate>,
@@ -444,7 +449,7 @@ async fn update_password_handler(
         key,
         auth_user_id
     )
-    .execute(&store)
+    .execute(&store.db_pool)
     .await;
 
     match result {
@@ -468,7 +473,7 @@ async fn update_password_handler(
 
 // NEW HANDLER: POST /login
 async fn login_handler(
-    State(store): State<PgPool>,
+    State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
     // 1. Retrieve User from DB
@@ -477,7 +482,7 @@ async fn login_handler(
         "SELECT id, username, hashed_password FROM users WHERE username = $1",
         payload.username
     )
-    .fetch_optional(&store)
+    .fetch_optional(&store.db_pool)
     .await;
 
     let user = match user {
@@ -535,7 +540,7 @@ async fn login_handler(
     let token = match encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(JWT_SECRET),
+        &EncodingKey::from_secret(&store.jwt_secret.as_bytes()),
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -554,7 +559,7 @@ async fn login_handler(
 // NEW: Authentication Middleware
 async fn auth_middleware(
     // State is passed to middleware if needed (e.g., database pool)
-    State(_store): State<PgPool>, // _pool if not used directly here
+    State(store): State<AppState>, // _pool if not used directly here
     headers: header::HeaderMap,   // Get all headers
     mut request: Request<Body>,   // The incoming request
     next: Next,                   // The next middleware or handler in the chain
@@ -568,7 +573,7 @@ async fn auth_middleware(
     };
 
     // 2. Decode and Validate JWT
-    let decoding_key = DecodingKey::from_secret(JWT_SECRET);
+    let decoding_key = DecodingKey::from_secret(&store.jwt_secret.as_bytes());
     let validation = Validation::default(); // Default validation (alg, exp etc.)
 
     let claims = match decode::<Claims>(&token, &decoding_key, &validation) {

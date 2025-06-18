@@ -27,10 +27,16 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::uuid;
-use sqlx::{PgPool, query, query_as};
+
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
 use uuid::Uuid;
+
+use crate::schema::users; // Import 'users' table definition
+use diesel_async::AsyncPgConnection;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+
+pub type DbPool = deadpool::managed::Pool<AsyncDieselConnectionManager<AsyncPgConnection>>;
 
 mod schema;
 
@@ -47,33 +53,29 @@ struct PasswordEntryUpdate {
 
 #[derive(Clone)]
 struct AppState {
-    db_pool: PgPool,
+    db_pool: DbPool,
     jwt_secret: String,
 }
 
-// struct to map database user row
 #[derive(sqlx::FromRow, Debug)]
 struct DbUser {
-    id: uuid::Uuid, // Assuming UUID primary key
+    id: uuid::Uuid,
     username: String,
     hashed_password: String,
 }
 
-// struct for JWT claims
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: String, // User ID or username
-    exp: i64,    // Expiration time (as Unix timestamp)
+    sub: String,
+    exp: i64,
 }
 
-// login Request DTO
 #[derive(Deserialize)]
 struct LoginRequest {
     username: String,
     password: String,
 }
 
-// login Response DTO
 #[derive(Serialize)]
 struct LoginResponse {
     token: String,
@@ -84,7 +86,7 @@ enum AuthError {
     InvalidToken,
     ExpiredToken,
     UserNotFound,
-    InternalServerError, // Catch-all for unexpected errors
+    InternalServerError,
 }
 
 #[derive(Deserialize)]
@@ -100,10 +102,9 @@ struct GeneratePasswordRequest {
 }
 
 fn default_password_length() -> u8 {
-    12 // Default length
+    12
 }
 
-// global API Error struct for consistent responses
 #[derive(Serialize)]
 struct ApiError {
     error: String,
@@ -119,13 +120,12 @@ impl IntoResponse for AuthError {
             ),
             AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
             AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
-            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()), // If you add DB check here
+            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()),
             AuthError::InternalServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),
         };
-
         Json(ApiError {
             error: error_message,
             code: status.as_u16(),
@@ -135,18 +135,23 @@ impl IntoResponse for AuthError {
 }
 
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
-#[diesel(table_name = schema::users)] // link to the users table in schema.rs
-// all fields should match schema.rs types precisely
+#[diesel(table_name = schema::users)]
 pub struct User {
     pub id: Uuid,
     pub username: String,
     pub hashed_password: String,
-    pub created_at: DateTime<Utc>, // matches TIMESTAMPTZ
+    pub created_at: DateTime<Utc>,
 }
 
-// NEW: Password Model
-#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
-#[diesel(table_name = schema::passwords)] // link to the passwords table in schema.rs
+#[derive(Insertable)]
+#[diesel(table_name = users)]
+pub struct NewUser<'a> {
+    pub username: &'a str,
+    pub hashed_password: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize, sqlx::FromRow)]
+#[diesel(table_name = schema::passwords)]
 pub struct Password {
     pub id: Uuid,
     pub key: String,
@@ -156,54 +161,51 @@ pub struct Password {
     pub user_id: Uuid,
 }
 
+// --- THE NEW MAIN FUNCTION ---
 #[tokio::main]
 async fn main() {
-    dotenv().ok(); // loads environment variables from .env
+    dotenv().ok();
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("listening on {}", addr);
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
-    let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set in .env file");
-    let db_pool = PgPool::connect(&database_url).await.unwrap_or_else(|err| {
-        eprintln!("Error connecting to database: {}", err);
-        process::exit(1);
-    });
+    // Load environment variables
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+
+    // Build the Diesel/Deadpool connection pool
+    let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new(&database_url);
+    let pool = DbPool::builder(manager)
+        .build()
+        .expect("Failed to create Diesel connection pool.");
+
+    // Create the application state
     let app_state = AppState {
-        db_pool,
+        db_pool: pool,
         jwt_secret,
     };
 
-    // run pending migrations. Important for dev environment.
-    sqlx::migrate!()
-        .run(&app_state.db_pool)
-        .await
-        .unwrap_or_else(|err| {
-            eprintln!("Error running migrations: {}", err);
-            process::exit(1);
-        });
-    println!("Database migrations applied.");
+    // NOTE: sqlx::migrate! is commented out. We will address Diesel migrations next.
+    // sqlx::migrate!().run(&app_state.db_pool).await.unwrap_or_else(/* ... */);
 
     let app = Router::new()
         .route("/", get(hello_handler))
         .route("/register", post(register_handler))
         .route("/login", post(login_handler))
         .route("/generate-password", get(generate_password_handler))
-        // protect the password routes with the auth_middleware
         .nest(
-            "/passwords", // all routes nested under /passwords
+            "/passwords",
             Router::new()
                 .route("/", post(create_password_handler))
                 .route("/", get(get_all_passwords_handler))
                 .route("/:key", get(get_password_handler))
                 .route("/:key", delete(delete_password_handler))
                 .route("/:key", put(update_password_handler))
-                // apply the middleware as a layer here
                 .layer(axum::middleware::from_fn_with_state(
                     app_state.clone(),
                     auth_middleware,
                 )),
         )
-        .with_state(app_state.clone());
+        .with_state(app_state);
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -233,7 +235,7 @@ async fn register_handler(
     let salt = SaltString::generate(&mut OsRng); // generate new random salt
     let argon2 = Argon2::default();
 
-    let hashed_password = match argon2.hash_password(password, &salt) {
+    let hashed_pass = match argon2.hash_password(password, &salt) {
         // Call hash_password on the argon2 instance
         Ok(hash) => hash.to_string(),
         Err(e) => {
@@ -246,14 +248,35 @@ async fn register_handler(
         }
     };
 
-    // store user in db
-    let result = sqlx::query!(
-        "INSERT INTO users (username, hashed_password) VALUES ($1, $2)",
-        payload.username,
-        hashed_password
-    )
-    .execute(&store.db_pool)
-    .await;
+    // get connection from deadpool pool
+    //    all Diesel operations run on a single connection.
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    let new_user = NewUser {
+        username: &payload.username,
+        hashed_password: &hashed_pass,
+    };
+
+    // DSL prelude and schema specifics
+    use crate::schema::users::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let result = diesel::insert_into(users)
+        .values(&new_user)
+        .execute(&mut conn)
+        .await;
 
     match result {
         Ok(_) => (
@@ -261,20 +284,20 @@ async fn register_handler(
             format!("User '{}' registered successfully.", payload.username),
         )
             .into_response(),
+
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => Json(ApiError {
+            error: "Username already exists".to_string(),
+            code: StatusCode::CONFLICT.as_u16(),
+        })
+        .into_response(),
+
         Err(e) => {
-            if let Some(db_err) = e.as_database_error() {
-                if db_err.code() == Some(Cow::Borrowed("23505")) {
-                    // Unique violation for username
-                    return Json(ApiError {
-                        error: "Username already exists".to_string(),
-                        code: StatusCode::CONFLICT.as_u16(),
-                    })
-                    .into_response();
-                }
-            }
             eprintln!("Database error during user registration: {}", e);
             Json(ApiError {
-                error: "Failed to register user due to database error.".to_string(),
+                error: "Failed to register user due to a database error.".to_string(),
                 code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             })
             .into_response()
@@ -509,7 +532,7 @@ async fn login_handler(
     let expiration = (now + Duration::hours(1)).timestamp(); // token expires in 1 hour
 
     let claims = Claims {
-        sub: user.id.to_string(), 
+        sub: user.id.to_string(),
         exp: expiration,
     };
 
@@ -534,10 +557,10 @@ async fn login_handler(
 
 // NEW: Authentication Middleware
 async fn auth_middleware(
-    State(store): State<AppState>, 
-    headers: header::HeaderMap,    // get all headers
-    mut request: Request<Body>,    // incoming request
-    next: Next,                    // next middleware or handler in the chain
+    State(store): State<AppState>,
+    headers: header::HeaderMap, // get all headers
+    mut request: Request<Body>, // incoming request
+    next: Next,                 // next middleware or handler in the chain
 ) -> Result<Response, AuthError> {
     // extract Authorization header
     let auth_header = headers.typed_get::<Authorization<Bearer>>();
@@ -597,11 +620,11 @@ async fn generate_password_handler(
     }
     if params.include_numbers {
         char_set.extend(&number_chars);
-        password_chars.push(*number_chars.choose(&mut rng).unwrap()); 
+        password_chars.push(*number_chars.choose(&mut rng).unwrap());
     }
     if params.include_symbols {
         char_set.extend(&symbol_chars);
-        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); 
+        password_chars.push(*symbol_chars.choose(&mut rng).unwrap());
     }
 
     if char_set.is_empty() {

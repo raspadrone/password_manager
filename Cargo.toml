@@ -22,6 +22,6 @@ rand_distr = "0.5.1"
 
 
 diesel = { version = "2.2.10", features = ["postgres", "uuid", "chrono"] }
-diesel-async = { version = "0.5.0", features = ["tokio", "deadpool"] }
+diesel-async = { version = "0.5.0", features = ["tokio", "deadpool", "postgres"] }
 
-deadpool = { version = "0.10.0", features = ["rt_tokio_1"] }
+deadpool = { version = "0.12.2", features = ["rt_tokio_1"] }

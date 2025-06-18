@@ -45,15 +45,13 @@ struct PasswordEntryUpdate {
     value: String,
 }
 
-// type AppStore = PgPool;
-
 #[derive(Clone)]
 struct AppState {
     db_pool: PgPool,
     jwt_secret: String,
 }
 
-// NEW: Struct to map database user row
+// struct to map database user row
 #[derive(sqlx::FromRow, Debug)]
 struct DbUser {
     id: uuid::Uuid, // Assuming UUID primary key
@@ -61,21 +59,21 @@ struct DbUser {
     hashed_password: String,
 }
 
-// NEW: Struct for JWT claims
+// struct for JWT claims
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String, // User ID or username
     exp: i64,    // Expiration time (as Unix timestamp)
 }
 
-// NEW: Login Request DTO
+// login Request DTO
 #[derive(Deserialize)]
 struct LoginRequest {
     username: String,
     password: String,
 }
 
-// NEW: Login Response DTO
+// login Response DTO
 #[derive(Serialize)]
 struct LoginResponse {
     token: String,
@@ -105,7 +103,7 @@ fn default_password_length() -> u8 {
     12 // Default length
 }
 
-// NEW: Global API Error structure for consistent responses
+// global API Error struct for consistent responses
 #[derive(Serialize)]
 struct ApiError {
     error: String,
@@ -127,7 +125,7 @@ impl IntoResponse for AuthError {
                 "Internal server error".to_string(),
             ),
         };
-        // Refactored to return Json(ApiError)
+
         Json(ApiError {
             error: error_message,
             code: status.as_u16(),
@@ -137,18 +135,18 @@ impl IntoResponse for AuthError {
 }
 
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
-#[diesel(table_name = schema::users)] // <-- IMPORTANT: Link to the users table in schema.rs
-// Ensure all fields match schema.rs types precisely.
+#[diesel(table_name = schema::users)] // link to the users table in schema.rs
+// all fields should match schema.rs types precisely
 pub struct User {
     pub id: Uuid,
     pub username: String,
     pub hashed_password: String,
-    pub created_at: DateTime<Utc>, // Matches TIMESTAMPTZ
+    pub created_at: DateTime<Utc>, // matches TIMESTAMPTZ
 }
 
 // NEW: Password Model
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
-#[diesel(table_name = schema::passwords)] // <-- IMPORTANT: Link to the passwords table in schema.rs
+#[diesel(table_name = schema::passwords)] // link to the passwords table in schema.rs
 pub struct Password {
     pub id: Uuid,
     pub key: String,
@@ -160,55 +158,46 @@ pub struct Password {
 
 #[tokio::main]
 async fn main() {
-    dotenv().ok(); // load DATABASE_URL environment variable
+    dotenv().ok(); // loads environment variables from .env
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("listening on {}", addr);
 
-    // Initialize our shared, mutable application state
-    // let store: AppStore = Arc::new(Mutex::new(HashMap::new()));
-
-    // NEW: Initialize PostgreSQL connection pool
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env file");
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set in .env file");
     let db_pool = PgPool::connect(&database_url).await.unwrap_or_else(|err| {
         eprintln!("Error connecting to database: {}", err);
         process::exit(1);
     });
-    let app_state = AppState { db_pool, jwt_secret };
+    let app_state = AppState {
+        db_pool,
+        jwt_secret,
+    };
 
-    // Run pending migrations. Important for dev environment.
-    sqlx::migrate!().run(&app_state.db_pool).await.unwrap_or_else(|err| {
-        eprintln!("Error running migrations: {}", err);
-        process::exit(1);
-    });
+    // run pending migrations. Important for dev environment.
+    sqlx::migrate!()
+        .run(&app_state.db_pool)
+        .await
+        .unwrap_or_else(|err| {
+            eprintln!("Error running migrations: {}", err);
+            process::exit(1);
+        });
     println!("Database migrations applied.");
-    // let app = Router::new()
-    //     .route("/", get(hello_handler))
-    //     .route("/register", post(register_handler))
-    //     .route("/login", post(login_handler))
-    //     // Add the new /passwords route for POST
-    //     .route("/passwords", post(create_password_handler))
-    //     // GET password
-    //     .route("/passwords/:key", get(get_password_handler))
-    //     .route("/passwords/:key", delete(delete_password_handler))
-    //     .route("/passwords/:key", put(update_password_handler))
-    //     // Pass the shared state to the router
-    //     .with_state(pool.clone());
+
     let app = Router::new()
         .route("/", get(hello_handler))
         .route("/register", post(register_handler))
         .route("/login", post(login_handler))
         .route("/generate-password", get(generate_password_handler))
-        // Protect the password routes with the auth_middleware
+        // protect the password routes with the auth_middleware
         .nest(
-            "/passwords", // All routes nested under /passwords
+            "/passwords", // all routes nested under /passwords
             Router::new()
                 .route("/", post(create_password_handler))
                 .route("/", get(get_all_passwords_handler))
                 .route("/:key", get(get_password_handler))
                 .route("/:key", delete(delete_password_handler))
                 .route("/:key", put(update_password_handler))
-                // Apply the middleware as a layer here
+                // apply the middleware as a layer here
                 .layer(axum::middleware::from_fn_with_state(
                     app_state.clone(),
                     auth_middleware,
@@ -235,27 +224,18 @@ struct PasswordValue {
     value: String,
 }
 
-// async fn register_handler(Json(payload): Json<RegisterRequest>) -> String {
-//     println!("Received registration request: {:?}", payload);
-//     format!(
-//         "User '{}' registered (dummy): Password length {}",
-//         payload.username,
-//         payload.password.len()
-//     )
-// }
-
 async fn register_handler(
-    State(store): State<AppState>, // Now takes PgPool
+    State(store): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> impl IntoResponse {
-    // 1. Hash the password
+    // hash password
     let password = payload.password.as_bytes();
-    let salt = SaltString::generate(&mut OsRng); // Generate a new random salt
+    let salt = SaltString::generate(&mut OsRng); // generate new random salt
     let argon2 = Argon2::default();
 
     let hashed_password = match argon2.hash_password(password, &salt) {
         // Call hash_password on the argon2 instance
-        Ok(hash) => hash.to_string(), // Convert the PasswordHash object to a String
+        Ok(hash) => hash.to_string(),
         Err(e) => {
             eprintln!("Error hashing password: {}", e);
             return Json(ApiError {
@@ -266,7 +246,7 @@ async fn register_handler(
         }
     };
 
-    // 2. Store user in database
+    // store user in db
     let result = sqlx::query!(
         "INSERT INTO users (username, hashed_password) VALUES ($1, $2)",
         payload.username,
@@ -304,18 +284,18 @@ async fn register_handler(
 
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
-    State(store): State<AppState>, // Extract the shared store
+    State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
-    Json(payload): Json<PasswordEntry>, // Extract the JSON request body
+    Json(payload): Json<PasswordEntry>, // extract JSON request body
 ) -> impl IntoResponse {
     let result = query!(
         "INSERT INTO passwords (key, value, user_id) VALUES ($1, $2, $3)",
         payload.key,
-        payload.value, // No need to clone, sqlx takes ownership/reference appropriately
+        payload.value,
         auth_user_id
     )
     .execute(&store.db_pool) // Execute the query on the pool
-    .await; // Await the async operation
+    .await;
 
     match result {
         Ok(_) => (
@@ -324,7 +304,6 @@ async fn create_password_handler(
         )
             .into_response(),
         Err(e) => {
-            // Check for specific database errors (e.g., unique constraint violation)
             if let Some(db_err) = e.as_database_error() {
                 if db_err.code() == Some(Cow::Borrowed("23505")) {
                     // '23505' is common for unique_violation
@@ -335,7 +314,7 @@ async fn create_password_handler(
                     .into_response();
                 }
             }
-            eprintln!("Database error during password creation: {}", e); // Log the error for debugging
+            eprintln!("Database error during password creation: {}", e);
 
             Json(ApiError {
                 error: "Failed to create password due to database error.".to_string(),
@@ -359,10 +338,7 @@ async fn get_all_passwords_handler(
     .await;
 
     match result {
-        Ok(passwords) => {
-            // Return 200 OK with the JSON array of passwords
-            (StatusCode::OK, Json(passwords)).into_response()
-        }
+        Ok(passwords) => (StatusCode::OK, Json(passwords)).into_response(),
         Err(e) => {
             eprintln!("Database error retrieving all passwords: {}", e);
             Json(ApiError {
@@ -476,7 +452,7 @@ async fn login_handler(
     State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // 1. Retrieve User from DB
+    // get User from DB
     let user = sqlx::query_as!(
         DbUser,
         "SELECT id, username, hashed_password FROM users WHERE username = $1",
@@ -500,7 +476,7 @@ async fn login_handler(
         }
     };
 
-    // 2. Verify Password
+    // check password
     let parsed_hash = match PasswordHash::new(&user.hashed_password) {
         Ok(hash) => hash,
         Err(e) => {
@@ -517,7 +493,7 @@ async fn login_handler(
     let password_verified = match argon2.verify_password(payload.password.as_bytes(), &parsed_hash)
     {
         Ok(_) => true,
-        Err(_) => false, // Verification failed
+        Err(_) => false, // verification failed
     };
 
     if !password_verified {
@@ -528,12 +504,12 @@ async fn login_handler(
         .into_response();
     }
 
-    // 3. Generate JWT
+    // generate JWT
     let now = Utc::now();
-    let expiration = (now + Duration::hours(1)).timestamp(); // Token expires in 1 hour
+    let expiration = (now + Duration::hours(1)).timestamp(); // token expires in 1 hour
 
     let claims = Claims {
-        sub: user.id.to_string(), // Use user ID as subject
+        sub: user.id.to_string(), 
         exp: expiration,
     };
 
@@ -558,13 +534,12 @@ async fn login_handler(
 
 // NEW: Authentication Middleware
 async fn auth_middleware(
-    // State is passed to middleware if needed (e.g., database pool)
-    State(store): State<AppState>, // _pool if not used directly here
-    headers: header::HeaderMap,   // Get all headers
-    mut request: Request<Body>,   // The incoming request
-    next: Next,                   // The next middleware or handler in the chain
+    State(store): State<AppState>, 
+    headers: header::HeaderMap,    // get all headers
+    mut request: Request<Body>,    // incoming request
+    next: Next,                    // next middleware or handler in the chain
 ) -> Result<Response, AuthError> {
-    // 1. Extract Authorization header
+    // extract Authorization header
     let auth_header = headers.typed_get::<Authorization<Bearer>>();
 
     let token = match auth_header {
@@ -572,7 +547,7 @@ async fn auth_middleware(
         None => return Err(AuthError::MissingToken), // No token found
     };
 
-    // 2. Decode and Validate JWT
+    // decode and Validate JWT
     let decoding_key = DecodingKey::from_secret(&store.jwt_secret.as_bytes());
     let validation = Validation::default(); // Default validation (alg, exp etc.)
 
@@ -587,7 +562,7 @@ async fn auth_middleware(
         }
     };
 
-    // 3. Extract User ID from Claims and Store in Request Extensions
+    // extract User ID from claims and store in request extensions
     let user_id = match Uuid::parse_str(&claims.sub) {
         Ok(id) => id,
         Err(e) => {
@@ -613,7 +588,7 @@ async fn generate_password_handler(
     let number_chars: Vec<char> = ('0'..='9').collect();
     let symbol_chars: Vec<char> = "!@#$%^&*()_+-=[]{}|;:,.<>?".chars().collect();
 
-    let mut char_set: Vec<char> = lowercase_chars.clone(); // Always include lowercase
+    let mut char_set: Vec<char> = lowercase_chars.clone(); // always include lowercase
 
     // Ensure at least one of each requested type, and add to the general pool
     if params.include_uppercase {
@@ -622,11 +597,11 @@ async fn generate_password_handler(
     }
     if params.include_numbers {
         char_set.extend(&number_chars);
-        password_chars.push(*number_chars.choose(&mut rng).unwrap()); // Ensure at least one
+        password_chars.push(*number_chars.choose(&mut rng).unwrap()); 
     }
     if params.include_symbols {
         char_set.extend(&symbol_chars);
-        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); // Ensure at least one
+        password_chars.push(*symbol_chars.choose(&mut rng).unwrap()); 
     }
 
     if char_set.is_empty() {

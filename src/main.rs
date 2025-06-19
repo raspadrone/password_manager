@@ -476,23 +476,46 @@ async fn delete_password_handler(
     Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
-        "DELETE FROM passwords WHERE key = $1 AND user_id = $2",
-        key,
-        auth_user_id
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    use crate::schema::passwords::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let result = diesel::delete(
+        passwords
+            .filter(key.eq(&key))
+            .filter(user_id.eq(auth_user_id)),
     )
-    .execute(&store.db_pool)
+    .execute(&mut conn)
     .await;
 
     match result {
-        Ok(res) => {
-            if res.rows_affected() > 0 {
-                (StatusCode::OK, format!("Password for key '{key}' deleted.")).into_response()
-            } else {
-                (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
-            }
+        Ok(0) => {
+            // 0 rows deleted -> password not found.
+            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
+        }
+        Ok(_) => {
+            // 1 (or more) rows deleted -> success.
+            (
+                StatusCode::OK,
+                format!("Password for key '{key:?}' deleted."),
+            )
+                .into_response()
         }
         Err(e) => {
+            // Handle any other database errors
             eprintln!("Internal error: {}", e);
             Json(ApiError {
                 error: "Internal server error".to_string(),

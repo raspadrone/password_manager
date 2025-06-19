@@ -151,7 +151,7 @@ struct DbUser {
     hashed_password: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
 #[diesel(table_name = schema::passwords)]
 pub struct Password {
     pub id: Uuid,
@@ -162,7 +162,6 @@ pub struct Password {
     pub user_id: Uuid,
 }
 
-// --- THE NEW MAIN FUNCTION ---
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -353,16 +352,33 @@ async fn get_all_passwords_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
 ) -> impl IntoResponse {
-    let result = query_as!(
-        Password,
-        "SELECT id, key, value, created_at, updated_at, user_id FROM passwords WHERE user_id = $1",
-        auth_user_id
-    )
-    .fetch_all(&store.db_pool)
-    .await;
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    use crate::schema::passwords::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let result = passwords // Start with the 'passwords' table from the schema
+        .filter(user_id.eq(auth_user_id)) // Find all passwords for this user
+        .load::<Password>(&mut conn) // Execute the query and load results into a Vec<Password>
+        .await;
 
     match result {
-        Ok(passwords) => (StatusCode::OK, Json(passwords)).into_response(),
+        Ok(passwords_vec) => {
+            // Success. The type of passwords_vec is Vec<Password>
+            (StatusCode::OK, Json(passwords_vec)).into_response()
+        }
         Err(e) => {
             eprintln!("Database error retrieving all passwords: {}", e);
             Json(ApiError {
@@ -476,11 +492,9 @@ async fn login_handler(
     State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    
     use crate::schema::users::dsl::*;
     use diesel::prelude::*;
     use diesel_async::RunQueryDsl;
-    
 
     // get a connection from pool
     let mut conn = match store.db_pool.get().await {
@@ -530,9 +544,12 @@ async fn login_handler(
             .into_response();
         }
     };
-    
+
     let argon2 = Argon2::default();
-    if argon2.verify_password(payload.password.as_bytes(), &parsed_hash).is_err() {
+    if argon2
+        .verify_password(payload.password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
         return Json(ApiError {
             error: "Invalid credentials".to_string(),
             code: StatusCode::UNAUTHORIZED.as_u16(),
@@ -549,7 +566,11 @@ async fn login_handler(
         exp: expiration,
     };
 
-    let token = match encode(&Header::default(), &claims, &EncodingKey::from_secret(store.jwt_secret.as_bytes())) {
+    let token = match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(store.jwt_secret.as_bytes()),
+    ) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error encoding JWT: {}", e);

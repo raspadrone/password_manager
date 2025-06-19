@@ -32,9 +32,10 @@ use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use crate::schema::users; // Import 'users' table definition
 use crate::schema::passwords;
+use crate::schema::users; // Import 'users' table definition
 
+use diesel::AsChangeset;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 
@@ -48,7 +49,8 @@ struct PasswordEntry {
     value: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, AsChangeset)]
+#[diesel(table_name = passwords)]
 struct PasswordEntryUpdate {
     value: String,
 }
@@ -152,8 +154,6 @@ struct DbUser {
     username: String,
     hashed_password: String,
 }
-
-
 
 #[derive(Insertable)]
 #[diesel(table_name = passwords)]
@@ -346,7 +346,10 @@ async fn create_password_handler(
         user_id: auth_user_id,
     };
 
-    let result = diesel::insert_into(passwords).values(new_pass).execute(&mut conn).await;
+    let result = diesel::insert_into(passwords)
+        .values(new_pass)
+        .execute(&mut conn)
+        .await;
 
     match result {
         Ok(_) => (
@@ -486,22 +489,44 @@ async fn update_password_handler(
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntryUpdate>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
-        "UPDATE passwords SET value = $1, updated_at = NOW() WHERE key = $2 AND user_id = $3",
-        payload.value,
-        key,
-        auth_user_id
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    use crate::schema::passwords::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let result = diesel::update(
+        passwords
+            .filter(key.eq(&key))
+            .filter(user_id.eq(auth_user_id)),
     )
-    .execute(&store.db_pool)
+    .set(&payload) // Pass a reference to our AsChangeset struct
+    .execute(&mut conn)
     .await;
 
     match result {
-        Ok(res) => {
-            if res.rows_affected() > 0 {
-                (StatusCode::OK, format!("Password for key '{key}' updated.")).into_response()
-            } else {
-                (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
-            }
+        Ok(0) => {
+            // No rows were updated, meaning the key wasn't found for that user.
+            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
+        }
+        Ok(_) => {
+            // One or more rows were updated successfully.
+            (
+                StatusCode::OK,
+                format!("Password for key '{}' updated.", key),
+            )
+                .into_response()
         }
         Err(e) => {
             eprintln!("Internal error: {}", e);

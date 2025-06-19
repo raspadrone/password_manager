@@ -426,18 +426,39 @@ async fn get_password_handler(
     Extension(auth_user_id): Extension<Uuid>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
-    let result = query_as!(
-        PasswordValue,
-        "SELECT value FROM passwords WHERE key = $1 AND user_id = $2",
-        key,
-        auth_user_id
-    )
-    .fetch_optional(&store.db_pool)
-    .await;
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    use crate::schema::passwords::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let result = passwords
+        .filter(key.eq(&key))
+        .filter(user_id.eq(auth_user_id))
+        .select(value)
+        .first::<String>(&mut conn)
+        .await;
 
     match result {
-        Ok(Some(r)) => (StatusCode::OK, format!("Found password '{}'", r.value)).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, format!("Password not found")).into_response(),
+        Ok(password_value) => (
+            StatusCode::OK,
+            format!("Found password '{}'", password_value),
+        )
+            .into_response(),
+        Err(diesel::result::Error::NotFound) => {
+            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
+        }
         Err(e) => {
             eprintln!("Internal error: {}", e);
             Json(ApiError {

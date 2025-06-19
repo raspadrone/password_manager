@@ -57,13 +57,6 @@ struct AppState {
     jwt_secret: String,
 }
 
-#[derive(sqlx::FromRow, Debug)]
-struct DbUser {
-    id: uuid::Uuid,
-    username: String,
-    hashed_password: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
@@ -148,6 +141,14 @@ pub struct User {
 pub struct NewUser<'a> {
     pub username: &'a str,
     pub hashed_password: &'a str,
+}
+
+#[derive(Queryable, Debug)]
+#[diesel(table_name = users)]
+struct DbUser {
+    id: uuid::Uuid,
+    username: String,
+    hashed_password: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize, sqlx::FromRow)]
@@ -470,23 +471,41 @@ async fn update_password_handler(
     }
 }
 
-// NEW HANDLER: POST /login
+//POST /login
 async fn login_handler(
     State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    // get User from DB
-    let user = sqlx::query_as!(
-        DbUser,
-        "SELECT id, username, hashed_password FROM users WHERE username = $1",
-        payload.username
-    )
-    .fetch_optional(&store.db_pool)
-    .await;
+    
+    use crate::schema::users::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+    
 
-    let user = match user {
-        Ok(Some(u)) => u,
-        Ok(None) => {
+    // get a connection from pool
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "Failed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    // build and execute query
+    let result = users
+        .filter(username.eq(&payload.username))
+        .select((id, username, hashed_password))
+        .first::<DbUser>(&mut conn)
+        .await;
+
+    // handle result
+    let user = match result {
+        Ok(user) => user,
+        Err(diesel::result::Error::NotFound) => {
             return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()).into_response();
         }
         Err(e) => {
@@ -499,7 +518,7 @@ async fn login_handler(
         }
     };
 
-    // check password
+    // verify password
     let parsed_hash = match PasswordHash::new(&user.hashed_password) {
         Ok(hash) => hash,
         Err(e) => {
@@ -511,15 +530,9 @@ async fn login_handler(
             .into_response();
         }
     };
-    let argon2 = Argon2::default(); // Ensure Argon2 is initialized here if not global
-
-    let password_verified = match argon2.verify_password(payload.password.as_bytes(), &parsed_hash)
-    {
-        Ok(_) => true,
-        Err(_) => false, // verification failed
-    };
-
-    if !password_verified {
+    
+    let argon2 = Argon2::default();
+    if argon2.verify_password(payload.password.as_bytes(), &parsed_hash).is_err() {
         return Json(ApiError {
             error: "Invalid credentials".to_string(),
             code: StatusCode::UNAUTHORIZED.as_u16(),
@@ -529,18 +542,14 @@ async fn login_handler(
 
     // generate JWT
     let now = Utc::now();
-    let expiration = (now + Duration::hours(1)).timestamp(); // token expires in 1 hour
+    let expiration = (now + Duration::hours(1)).timestamp();
 
     let claims = Claims {
         sub: user.id.to_string(),
         exp: expiration,
     };
 
-    let token = match encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(&store.jwt_secret.as_bytes()),
-    ) {
+    let token = match encode(&Header::default(), &claims, &EncodingKey::from_secret(store.jwt_secret.as_bytes())) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("Error encoding JWT: {}", e);

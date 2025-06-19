@@ -33,6 +33,8 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 use crate::schema::users; // Import 'users' table definition
+use crate::schema::passwords;
+
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 
@@ -149,6 +151,16 @@ struct DbUser {
     id: uuid::Uuid,
     username: String,
     hashed_password: String,
+}
+
+
+
+#[derive(Insertable)]
+#[diesel(table_name = passwords)]
+pub struct NewPassword<'a> {
+    pub key: &'a str,
+    pub value: &'a str,
+    pub user_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
@@ -311,14 +323,30 @@ async fn create_password_handler(
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // extract JSON request body
 ) -> impl IntoResponse {
-    let result = query!(
-        "INSERT INTO passwords (key, value, user_id) VALUES ($1, $2, $3)",
-        payload.key,
-        payload.value,
-        auth_user_id
-    )
-    .execute(&store.db_pool) // Execute the query on the pool
-    .await;
+    let mut conn = match store.db_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response();
+        }
+    };
+
+    use crate::schema::passwords::dsl::*;
+    use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
+
+    let new_pass = NewPassword {
+        key: &payload.key,
+        value: &payload.value,
+        user_id: auth_user_id,
+    };
+
+    let result = diesel::insert_into(passwords).values(new_pass).execute(&mut conn).await;
 
     match result {
         Ok(_) => (
@@ -326,21 +354,20 @@ async fn create_password_handler(
             format!("Password for key '{}' created successfully.", payload.key),
         )
             .into_response(),
-        Err(e) => {
-            if let Some(db_err) = e.as_database_error() {
-                if db_err.code() == Some(Cow::Borrowed("23505")) {
-                    // '23505' is common for unique_violation
-                    return Json(ApiError {
-                        error: "Key already exists".to_string(),
-                        code: StatusCode::CONFLICT.as_u16(),
-                    })
-                    .into_response();
-                }
-            }
-            eprintln!("Database error during password creation: {}", e);
 
+        Err(diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation,
+            _,
+        )) => Json(ApiError {
+            error: "Key already exists".to_string(),
+            code: StatusCode::CONFLICT.as_u16(),
+        })
+        .into_response(),
+
+        Err(e) => {
+            eprintln!("Database error during password registration: {}", e);
             Json(ApiError {
-                error: "Failed to create password due to database error.".to_string(),
+                error: "Failed to register password due to a database error.".to_string(),
                 code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             })
             .into_response()

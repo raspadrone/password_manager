@@ -524,7 +524,7 @@ async fn update_password_handler(
             // One or more rows were updated successfully.
             (
                 StatusCode::OK,
-                format!("Password for key '{}' updated.", key),
+                format!("Password for key '{:?}' updated.", key),
             )
                 .into_response()
         }

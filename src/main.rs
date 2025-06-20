@@ -39,6 +39,11 @@ use diesel::AsChangeset;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 
+use crate::schema::passwords::dsl::*;
+use crate::schema::users::dsl::*;
+use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
+
 pub type DbPool = deadpool::managed::Pool<AsyncDieselConnectionManager<AsyncPgConnection>>;
 
 mod schema;
@@ -233,11 +238,6 @@ struct RegisterRequest {
     password: String,
 }
 
-#[derive(sqlx::FromRow)]
-struct PasswordValue {
-    value: String,
-}
-
 async fn register_handler(
     State(store): State<AppState>,
     Json(payload): Json<RegisterRequest>,
@@ -262,28 +262,15 @@ async fn register_handler(
 
     // get connection from deadpool pool
     //    all Diesel operations run on a single connection.
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
 
     let new_user = NewUser {
         username: &payload.username,
         hashed_password: &hashed_pass,
     };
-
-    // DSL prelude and schema specifics
-    use crate::schema::users::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
 
     let result = diesel::insert_into(users)
         .values(&new_user)
@@ -323,22 +310,10 @@ async fn create_password_handler(
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // extract JSON request body
 ) -> impl IntoResponse {
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
-
-    use crate::schema::passwords::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
 
     let new_pass = NewPassword {
         key: &payload.key,
@@ -382,22 +357,10 @@ async fn get_all_passwords_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
 ) -> impl IntoResponse {
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
-
-    use crate::schema::passwords::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
 
     let result = passwords // Start with the 'passwords' table from the schema
         .filter(user_id.eq(auth_user_id)) // Find all passwords for this user
@@ -424,27 +387,15 @@ async fn get_all_passwords_handler(
 async fn get_password_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
-    Path(key): Path<String>,
+    Path(some_key): Path<String>,
 ) -> impl IntoResponse {
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
 
-    use crate::schema::passwords::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
-
     let result = passwords
-        .filter(key.eq(&key))
+        .filter(key.eq(&some_key))
         .filter(user_id.eq(auth_user_id))
         .select(value)
         .first::<String>(&mut conn)
@@ -474,28 +425,16 @@ async fn get_password_handler(
 async fn delete_password_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
-    Path(key): Path<String>,
+    Path(some_key): Path<String>,
 ) -> impl IntoResponse {
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
-
-    use crate::schema::passwords::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
 
     let result = diesel::delete(
         passwords
-            .filter(key.eq(&key))
+            .filter(key.eq(&some_key))
             .filter(user_id.eq(auth_user_id)),
     )
     .execute(&mut conn)
@@ -510,7 +449,7 @@ async fn delete_password_handler(
             // 1 (or more) rows deleted -> success.
             (
                 StatusCode::OK,
-                format!("Password for key '{key:?}' deleted."),
+                format!("Password for key '{some_key:?}' deleted."),
             )
                 .into_response()
         }
@@ -529,30 +468,18 @@ async fn delete_password_handler(
 // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
 async fn update_password_handler(
     State(store): State<AppState>,
-    Path(key): Path<String>,
+    Path(some_key): Path<String>,
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntryUpdate>,
 ) -> impl IntoResponse {
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
-
-    use crate::schema::passwords::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
 
     let result = diesel::update(
         passwords
-            .filter(key.eq(&key))
+            .filter(key.eq(&some_key))
             .filter(user_id.eq(auth_user_id)),
     )
     .set(&payload) // Pass a reference to our AsChangeset struct
@@ -568,7 +495,7 @@ async fn update_password_handler(
             // One or more rows were updated successfully.
             (
                 StatusCode::OK,
-                format!("Password for key '{:?}' updated.", key),
+                format!("Password for key '{:?}' updated.", some_key),
             )
                 .into_response()
         }
@@ -588,27 +515,15 @@ async fn login_handler(
     State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> impl IntoResponse {
-    use crate::schema::users::dsl::*;
-    use diesel::prelude::*;
-    use diesel_async::RunQueryDsl;
-
-    // get a connection from pool
-    let mut conn = match store.db_pool.get().await {
+    let mut conn = match get_connection(&store).await {
         Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Json(ApiError {
-                error: "Failed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
+        Err(resp) => return resp,
     };
 
     // build and execute query
     let result = users
         .filter(username.eq(&payload.username))
-        .select((id, username, hashed_password))
+        .select((users::id, users::username, users::hashed_password))
         .first::<DbUser>(&mut conn)
         .await;
 
@@ -712,14 +627,14 @@ async fn auth_middleware(
     };
 
     // extract User ID from claims and store in request extensions
-    let user_id = match Uuid::parse_str(&claims.sub) {
-        Ok(id) => id,
+    let some_user_id = match Uuid::parse_str(&claims.sub) {
+        Ok(some_id) => some_id,
         Err(e) => {
             eprintln!("Invalid UUID in token subject: {}", e);
             return Err(AuthError::InvalidToken); // Malformed user ID in token
         }
     };
-    request.extensions_mut().insert(user_id); // Store the Uuid directly
+    request.extensions_mut().insert(some_user_id); // Store the Uuid directly
 
     // 4. Proceed to the next handler/middleware
     Ok(next.run(request).await)
@@ -773,4 +688,24 @@ async fn generate_password_handler(
         Json(json!({"password": generated_password})),
     )
         .into_response()
+}
+
+async fn get_connection(
+    store: &AppState,
+) -> Result<
+    deadpool::managed::Object<AsyncDieselConnectionManager<AsyncPgConnection>>,
+    axum::http::Response<Body>,
+> {
+    match store.db_pool.get().await {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            // Handle pool error
+            eprintln!("Failed to get DB connection from pool: {}", e);
+            return Err(Json(ApiError {
+                error: "ailed to get DB connection from pool".to_string(),
+                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            })
+            .into_response());
+        }
+    }
 }

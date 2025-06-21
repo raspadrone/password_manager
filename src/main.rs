@@ -575,59 +575,31 @@ async fn update_password_handler(
 async fn login_handler(
     State(store): State<AppState>,
     Json(payload): Json<LoginRequest>,
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    // ? handles the Result from get_connection()
+    let mut conn = get_connection(&store).await?;
 
     // build and execute query
-    let result = users
+    // ? operator handles Result from db query.
+    // `From<diesel::result::Error>` implementation automatically
+    // converts `Error::NotFound` to `AppError::NotFound`
+    let user = users
         .filter(username.eq(&payload.username))
         .select((users::id, users::username, users::hashed_password))
         .first::<DbUser>(&mut conn)
-        .await;
-
-    // handle result
-    let user = match result {
-        Ok(user) => user,
-        Err(diesel::result::Error::NotFound) => {
-            return (StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()).into_response();
-        }
-        Err(e) => {
-            eprintln!("Database error during user retrieval: {}", e);
-            return Json(ApiError {
-                error: "Database error".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
-    };
+        .await?;
 
     // verify password
-    let parsed_hash = match PasswordHash::new(&user.hashed_password) {
-        Ok(hash) => hash,
-        Err(e) => {
-            eprintln!("Error parsing stored password hash: {}", e);
-            return Json(ApiError {
-                error: "Internal server error".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
-    };
+    // For errors that don't have a `From` trait, use `.map_err()`
+    // to manually convert them into an AppError before using `?`.
+    let parsed_hash = PasswordHash::new(&user.hashed_password).map_err(|e| {
+        AppError::InternalServerError(format!("Failed to parse password hash: {}", e))
+    })?;
 
     let argon2 = Argon2::default();
-    if argon2
+    argon2
         .verify_password(payload.password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
-        return Json(ApiError {
-            error: "Invalid credentials".to_string(),
-            code: StatusCode::UNAUTHORIZED.as_u16(),
-        })
-        .into_response();
-    }
+        .map_err(|_| AppError::InvalidToken)?;
 
     // generate JWT
     let now = Utc::now();
@@ -638,23 +610,14 @@ async fn login_handler(
         exp: expiration,
     };
 
-    let token = match encode(
+    let token = encode(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(store.jwt_secret.as_bytes()),
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Error encoding JWT: {}", e);
-            return Json(ApiError {
-                error: "Failed to generate token".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
-    };
+    )
+    .map_err(|e| AppError::InternalServerError(format!("Failed to generate token: {}", e)))?;
 
-    (StatusCode::OK, Json(LoginResponse { token })).into_response()
+    Ok((StatusCode::OK, Json(LoginResponse { token })))
 }
 
 // NEW: Authentication Middleware

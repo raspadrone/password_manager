@@ -257,6 +257,12 @@ pub struct PasswordResponse {
     pub user_id: Uuid,
 }
 
+#[derive(Deserialize, Debug)]
+struct RegisterRequest {
+    username: String,
+    password: String,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -278,8 +284,6 @@ async fn main() {
         db_pool: pool,
         jwt_secret,
     };
-
-
 
     let app = Router::new()
         .route("/", get(hello_handler))
@@ -305,16 +309,19 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+/// Handler for the root endpoint (`/`).
+/// Returns a simple greeting string to confirm the server is running.
 async fn hello_handler() -> String {
     "Hello, Password Manager!".to_string()
 }
 
-#[derive(Deserialize, Debug)]
-struct RegisterRequest {
-    username: String,
-    password: String,
-}
-
+/// Handler for user registration (`POST /register`).
+/// Accepts a JSON payload with `username` and `password`, hashes the password,
+/// creates a new user in the database, and returns the created user as JSON.
+///
+/// Returns:
+/// - `201 Created` with the created user on success.
+/// - Appropriate error response on failure.
 async fn register_handler(
     State(store): State<AppState>,
     Json(payload): Json<RegisterRequest>,
@@ -345,6 +352,13 @@ async fn register_handler(
     Ok((StatusCode::CREATED, Json(created_user)))
 }
 
+/// Handler for creating a new password entry (`POST /passwords/`).
+/// Requires authentication. Accepts a JSON payload with `key` and `value`,
+/// stores the password for the authenticated user, and returns the created entry (without the value).
+///
+/// Returns:
+/// - `201 Created` with the created password metadata on success.
+/// - Appropriate error response on failure.
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
 async fn create_password_handler(
     State(store): State<AppState>,
@@ -373,6 +387,12 @@ async fn create_password_handler(
     Ok((StatusCode::CREATED, Json(response_body)))
 }
 
+/// Handler for retrieving all password entries for the authenticated user (`GET /passwords/`).
+/// Requires authentication. Returns a list of password metadata (without values).
+///
+/// Returns:
+/// - `200 OK` with a list of password entries.
+/// - Appropriate error response on failure.
 async fn get_all_passwords_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
@@ -387,6 +407,12 @@ async fn get_all_passwords_handler(
     Ok((StatusCode::OK, Json(result)))
 }
 
+/// Handler for retrieving a specific password value by key (`GET /passwords/:key`).
+/// Requires authentication. Returns the password value for the given key if it exists.
+///
+/// Returns:
+/// - `200 OK` with the password value as JSON.
+/// - Appropriate error response on failure.
 // curl http://127.0.0.1:3000/passwords/my_app_login
 async fn get_password_handler(
     State(store): State<AppState>,
@@ -405,6 +431,12 @@ async fn get_password_handler(
     Ok((StatusCode::OK, Json(result)))
 }
 
+/// Handler for deleting a password entry by key (`DELETE /passwords/:key`).
+/// Requires authentication. Deletes the password entry for the given key and returns its metadata.
+///
+/// Returns:
+/// - `200 OK` with the deleted password metadata.
+/// - Appropriate error response on failure.
 // curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
 async fn delete_password_handler(
     State(store): State<AppState>,
@@ -432,6 +464,13 @@ async fn delete_password_handler(
     Ok((StatusCode::OK, Json(response_body)))
 }
 
+/// Handler for updating a password entry by key (`PUT /passwords/:key`).
+/// Requires authentication. Accepts a JSON payload with the new `value`,
+/// updates the password entry, and returns the updated metadata.
+///
+/// Returns:
+/// - `200 OK` with the updated password metadata.
+/// - Appropriate error response on failure.
 // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
 async fn update_password_handler(
     State(store): State<AppState>,
@@ -461,6 +500,13 @@ async fn update_password_handler(
     Ok((StatusCode::OK, Json(response_body)))
 }
 
+/// Handler for user login (`POST /login`).
+/// Accepts a JSON payload with `username` and `password`, verifies credentials,
+/// and returns a JWT token on success.
+///
+/// Returns:
+/// - `200 OK` with a JWT token as JSON.
+/// - Appropriate error response on failure.
 //POST /login
 async fn login_handler(
     State(store): State<AppState>,
@@ -510,7 +556,13 @@ async fn login_handler(
     Ok((StatusCode::OK, Json(LoginResponse { token })))
 }
 
-// NEW: Authentication Middleware
+/// Authentication middleware for protected routes.
+/// Extracts and validates the JWT from the `Authorization` header,
+/// and injects the authenticated user's UUID into request extensions.
+///
+/// Returns:
+/// - Proceeds to the next handler on valid authentication.
+/// - Returns an error response if authentication fails.
 async fn auth_middleware(
     State(store): State<AppState>,
     headers: header::HeaderMap, // get all headers
@@ -554,6 +606,13 @@ async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
+/// Handler for generating a random password (`GET /generate-password`).
+/// Accepts query parameters to customize password length and character sets.
+/// Returns a randomly generated password as JSON.
+///
+/// Returns:
+/// - `200 OK` with the generated password.
+/// - Appropriate error response on failure.
 // curl "http://127.0.0.1:3000/generate-password?length=24&include_uppercase=true&include_numbers=true&include_symbols=true"
 async fn generate_password_handler(
     Query(params): Query<GeneratePasswordRequest>,
@@ -603,6 +662,8 @@ async fn generate_password_handler(
     ))
 }
 
+/// Helper function to get a database connection from the pool.
+/// Returns a pooled connection or an error if the pool is exhausted or unavailable.
 async fn get_connection(
     store: &AppState,
 ) -> Result<deadpool::managed::Object<AsyncDieselConnectionManager<AsyncPgConnection>>, AppError> {

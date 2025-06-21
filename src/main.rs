@@ -84,14 +84,6 @@ struct LoginResponse {
     token: String,
 }
 
-// enum AuthError {
-//     MissingToken,
-//     InvalidToken,
-//     ExpiredToken,
-//     UserNotFound,
-//     InternalServerError,
-// }
-
 #[derive(Deserialize)]
 struct GeneratePasswordRequest {
     #[serde(default = "default_password_length")]
@@ -113,6 +105,7 @@ pub enum AppError {
     NotFound,
     // general db error
     DatabaseError(Error),
+    Conflict(String),
     // conn error
     PoolError(deadpool::managed::PoolError<diesel_async::pooled_connection::PoolError>),
     // auth errors
@@ -142,6 +135,10 @@ impl IntoResponse for AppError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "A database error occurred.".to_string(),
                 )
+            }
+            AppError::Conflict(message) => {
+                eprintln!("Conflict: {message}");
+                (StatusCode::CONFLICT, message)
             }
             AppError::PoolError(pool_error) => {
                 eprintln!("Connection Pool Error: {:?}", pool_error);
@@ -184,6 +181,16 @@ impl From<diesel::result::Error> for AppError {
     fn from(error: diesel::result::Error) -> Self {
         match error {
             diesel::result::Error::NotFound => AppError::NotFound,
+            diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                db_error_info,
+            ) => {
+                // We've identified a unique violation. Now we can create our Conflict error.
+                // We can even inspect `db_error_info` to get the specific constraint name
+                // if we want to be more specific (e.g., "Username already exists").
+                AppError::Conflict(db_error_info.message().to_string())
+            }
+            // All other database errors are still treated as internal server errors
             _ => AppError::DatabaseError(error),
         }
     }
@@ -240,6 +247,16 @@ pub struct Password {
     pub user_id: Uuid,
 }
 
+#[derive(Serialize)]
+pub struct PasswordResponse {
+    pub id: Uuid,
+    pub key: String,
+    // Notice: no 'value' field!
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub user_id: Uuid,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -262,8 +279,7 @@ async fn main() {
         jwt_secret,
     };
 
-    // NOTE: sqlx::migrate! is commented out. We will address Diesel migrations next.
-    // sqlx::migrate!().run(&app_state.db_pool).await.unwrap_or_else(/* ... */);
+
 
     let app = Router::new()
         .route("/", get(hello_handler))
@@ -302,67 +318,31 @@ struct RegisterRequest {
 async fn register_handler(
     State(store): State<AppState>,
     Json(payload): Json<RegisterRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     // hash password
     let password = payload.password.as_bytes();
     let salt = SaltString::generate(&mut OsRng); // generate new random salt
     let argon2 = Argon2::default();
 
-    let hashed_pass = match argon2.hash_password(password, &salt) {
-        // Call hash_password on the argon2 instance
-        Ok(hash) => hash.to_string(),
-        Err(e) => {
-            eprintln!("Error hashing password: {}", e);
-            return Json(ApiError {
-                error: "Failed to hash password.".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response();
-        }
-    };
+    let hashed_pass = argon2
+        .hash_password(password, &salt)
+        .map_err(|e| AppError::InternalServerError(format!("{e}")))?
+        .to_string();
 
     // get connection from deadpool pool
     //    all Diesel operations run on a single connection.
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
-
+    let mut conn = get_connection(&store).await?;
     let new_user = NewUser {
         username: &payload.username,
         hashed_password: &hashed_pass,
     };
 
-    let result = diesel::insert_into(users)
+    let created_user = diesel::insert_into(users)
         .values(&new_user)
-        .execute(&mut conn)
-        .await;
+        .get_result::<User>(&mut conn)
+        .await?;
 
-    match result {
-        Ok(_) => (
-            StatusCode::CREATED,
-            format!("User '{}' registered successfully.", payload.username),
-        )
-            .into_response(),
-
-        Err(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            _,
-        )) => Json(ApiError {
-            error: "Username already exists".to_string(),
-            code: StatusCode::CONFLICT.as_u16(),
-        })
-        .into_response(),
-
-        Err(e) => {
-            eprintln!("Database error during user registration: {}", e);
-            Json(ApiError {
-                error: "Failed to register user due to a database error.".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+    Ok((StatusCode::CREATED, Json(created_user)))
 }
 
 // curl -X POST -H "Content-Type: application/json" -d '{"key": "my_app_login", "value": "supersecret"}' http://127.0.0.1:3000/passwords
@@ -370,11 +350,8 @@ async fn create_password_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntry>, // extract JSON request body
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let mut conn = get_connection(&store).await?;
 
     let new_pass = NewPassword {
         key: &payload.key,
@@ -382,66 +359,32 @@ async fn create_password_handler(
         user_id: auth_user_id,
     };
 
-    let result = diesel::insert_into(passwords)
+    let created_pass = diesel::insert_into(passwords)
         .values(new_pass)
-        .execute(&mut conn)
-        .await;
-
-    match result {
-        Ok(_) => (
-            StatusCode::CREATED,
-            format!("Password for key '{}' created successfully.", payload.key),
-        )
-            .into_response(),
-
-        Err(diesel::result::Error::DatabaseError(
-            diesel::result::DatabaseErrorKind::UniqueViolation,
-            _,
-        )) => Json(ApiError {
-            error: "Key already exists".to_string(),
-            code: StatusCode::CONFLICT.as_u16(),
-        })
-        .into_response(),
-
-        Err(e) => {
-            eprintln!("Database error during password registration: {}", e);
-            Json(ApiError {
-                error: "Failed to register password due to a database error.".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+        .get_result::<Password>(&mut conn)
+        .await?;
+    let response_body = PasswordResponse {
+        id: created_pass.id,
+        key: created_pass.key,
+        created_at: created_pass.created_at,
+        updated_at: created_pass.updated_at,
+        user_id: created_pass.user_id,
+    };
+    Ok((StatusCode::CREATED, Json(response_body)))
 }
 
 async fn get_all_passwords_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let mut conn = get_connection(&store).await?;
 
     let result = passwords // Start with the 'passwords' table from the schema
         .filter(user_id.eq(auth_user_id)) // Find all passwords for this user
         .load::<Password>(&mut conn) // Execute the query and load results into a Vec<Password>
-        .await;
+        .await?;
 
-    match result {
-        Ok(passwords_vec) => {
-            // Success. The type of passwords_vec is Vec<Password>
-            (StatusCode::OK, Json(passwords_vec)).into_response()
-        }
-        Err(e) => {
-            eprintln!("Database error retrieving all passwords: {}", e);
-            Json(ApiError {
-                error: "Internal server error retrieving passwords".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+    Ok((StatusCode::OK, Json(result)))
 }
 
 // curl http://127.0.0.1:3000/passwords/my_app_login
@@ -449,37 +392,17 @@ async fn get_password_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
     Path(some_key): Path<String>,
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let mut conn = get_connection(&store).await?;
 
     let result = passwords
         .filter(key.eq(&some_key))
         .filter(user_id.eq(auth_user_id))
         .select(value)
         .first::<String>(&mut conn)
-        .await;
+        .await?;
 
-    match result {
-        Ok(password_value) => (
-            StatusCode::OK,
-            format!("Found password '{}'", password_value),
-        )
-            .into_response(),
-        Err(diesel::result::Error::NotFound) => {
-            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
-        }
-        Err(e) => {
-            eprintln!("Internal error: {}", e);
-            Json(ApiError {
-                error: "Internal server error".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+    Ok((StatusCode::OK, Json(result)))
 }
 
 // curl -X DELETE http://127.0.0.1:3000/passwords/my_app_login
@@ -487,43 +410,26 @@ async fn delete_password_handler(
     State(store): State<AppState>,
     Extension(auth_user_id): Extension<Uuid>,
     Path(some_key): Path<String>,
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let mut conn = get_connection(&store).await?;
 
-    let result = diesel::delete(
+    let deleted_pass = diesel::delete(
         passwords
             .filter(key.eq(&some_key))
             .filter(user_id.eq(auth_user_id)),
     )
-    .execute(&mut conn)
-    .await;
+    .get_result::<Password>(&mut conn)
+    .await?;
 
-    match result {
-        Ok(0) => {
-            // 0 rows deleted -> password not found.
-            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
-        }
-        Ok(_) => {
-            // 1 (or more) rows deleted -> success.
-            (
-                StatusCode::OK,
-                format!("Password for key '{some_key:?}' deleted."),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            // Handle any other database errors
-            eprintln!("Internal error: {}", e);
-            Json(ApiError {
-                error: "Internal server error".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+    let response_body = PasswordResponse {
+        id: deleted_pass.id,
+        key: deleted_pass.key,
+        created_at: deleted_pass.created_at,
+        updated_at: deleted_pass.updated_at,
+        user_id: deleted_pass.user_id,
+    };
+
+    Ok((StatusCode::OK, Json(response_body)))
 }
 
 // curl -X PUT -H "Content-Type: application/json" -d '{"value": "new_updated_secret"}' http://127.0.0.1:3000/passwords/my_app_login
@@ -532,43 +438,27 @@ async fn update_password_handler(
     Path(some_key): Path<String>,
     Extension(auth_user_id): Extension<Uuid>,
     Json(payload): Json<PasswordEntryUpdate>,
-) -> impl IntoResponse {
-    let mut conn = match get_connection(&store).await {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
+) -> Result<impl IntoResponse, AppError> {
+    let mut conn = get_connection(&store).await?;
 
-    let result = diesel::update(
+    let updated_pass = diesel::update(
         passwords
             .filter(key.eq(&some_key))
             .filter(user_id.eq(auth_user_id)),
     )
     .set(&payload) // Pass a reference to our AsChangeset struct
-    .execute(&mut conn)
-    .await;
+    .get_result::<Password>(&mut conn)
+    .await?;
 
-    match result {
-        Ok(0) => {
-            // No rows were updated, meaning the key wasn't found for that user.
-            (StatusCode::NOT_FOUND, "Password not found".to_string()).into_response()
-        }
-        Ok(_) => {
-            // One or more rows were updated successfully.
-            (
-                StatusCode::OK,
-                format!("Password for key '{:?}' updated.", some_key),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            eprintln!("Internal error: {}", e);
-            Json(ApiError {
-                error: "Internal server error".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response()
-        }
-    }
+    let response_body = PasswordResponse {
+        id: updated_pass.id,
+        key: updated_pass.key,
+        created_at: updated_pass.created_at,
+        updated_at: updated_pass.updated_at,
+        user_id: updated_pass.user_id,
+    };
+
+    Ok((StatusCode::OK, Json(response_body)))
 }
 
 //POST /login
@@ -660,14 +550,14 @@ async fn auth_middleware(
     };
     request.extensions_mut().insert(some_user_id); // Store the Uuid directly
 
-    // 4. Proceed to the next handler/middleware
+    // go to next handler/middleware
     Ok(next.run(request).await)
 }
 
 // curl "http://127.0.0.1:3000/generate-password?length=24&include_uppercase=true&include_numbers=true&include_symbols=true"
 async fn generate_password_handler(
     Query(params): Query<GeneratePasswordRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let mut rng = rng();
     let mut password_chars = Vec::new();
 
@@ -707,11 +597,10 @@ async fn generate_password_handler(
 
     let generated_password: String = password_chars.iter().collect();
 
-    (
+    Ok((
         StatusCode::OK,
         Json(json!({"password": generated_password})),
-    )
-        .into_response()
+    ))
 }
 
 async fn get_connection(

@@ -19,6 +19,7 @@ use axum_extra::headers::authorization::Bearer;
 use axum_extra::headers::{Authorization, HeaderMapExt};
 use chrono::{DateTime, Duration, Utc};
 use diesel::prelude::{Insertable, Queryable};
+use diesel::result::Error;
 use dotenvy::dotenv;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::rng;
@@ -83,13 +84,13 @@ struct LoginResponse {
     token: String,
 }
 
-enum AuthError {
-    MissingToken,
-    InvalidToken,
-    ExpiredToken,
-    UserNotFound,
-    InternalServerError,
-}
+// enum AuthError {
+//     MissingToken,
+//     InvalidToken,
+//     ExpiredToken,
+//     UserNotFound,
+//     InternalServerError,
+// }
 
 #[derive(Deserialize)]
 struct GeneratePasswordRequest {
@@ -107,32 +108,92 @@ fn default_password_length() -> u8 {
     12
 }
 
+pub enum AppError {
+    // record not found in db
+    NotFound,
+    // general db error
+    DatabaseError(Error),
+    // conn error
+    PoolError(deadpool::managed::PoolError<diesel_async::pooled_connection::PoolError>),
+    // auth errors
+    InvalidToken,
+    MissingToken,
+    ExpiredToken,
+    // general server error
+    InternalServerError(String),
+}
+
 #[derive(Serialize)]
 struct ApiError {
     error: String,
     code: u16,
 }
 
-impl IntoResponse for AuthError {
+impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_message) = match self {
-            AuthError::MissingToken => (
+            AppError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "The requested resource was not found.".to_string(),
+            ),
+            AppError::DatabaseError(db_error) => {
+                eprintln!("Database Error: {:?}", db_error);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "A database error occurred.".to_string(),
+                )
+            }
+            AppError::PoolError(pool_error) => {
+                eprintln!("Connection Pool Error: {:?}", pool_error);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal server error occurred.".to_string(),
+                )
+            }
+            AppError::InvalidToken => (
                 StatusCode::UNAUTHORIZED,
-                "Authorization token missing".to_string(),
+                "Invalid authentication token.".to_string(),
             ),
-            AuthError::InvalidToken => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
-            AuthError::ExpiredToken => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
-            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()),
-            AuthError::InternalServerError => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
+            AppError::MissingToken => (
+                StatusCode::UNAUTHORIZED,
+                "Missing authentication token.".to_string(),
             ),
+            AppError::ExpiredToken => (
+                StatusCode::UNAUTHORIZED,
+                "Authentication token has expired.".to_string(),
+            ),
+            AppError::InternalServerError(details) => {
+                eprintln!("Internal Server Error: {}", details);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal server error occurred.".to_string(),
+                )
+            }
         };
-        Json(ApiError {
+
+        // final JSON response body
+        let body = Json(ApiError {
             error: error_message,
             code: status.as_u16(),
-        })
-        .into_response()
+        });
+        (status, body).into_response()
+    }
+}
+
+impl From<diesel::result::Error> for AppError {
+    fn from(error: diesel::result::Error) -> Self {
+        match error {
+            diesel::result::Error::NotFound => AppError::NotFound,
+            _ => AppError::DatabaseError(error),
+        }
+    }
+}
+
+impl From<deadpool::managed::PoolError<diesel_async::pooled_connection::PoolError>> for AppError {
+    fn from(
+        error: deadpool::managed::PoolError<diesel_async::pooled_connection::PoolError>,
+    ) -> Self {
+        AppError::PoolError(error)
     }
 }
 
@@ -602,13 +663,13 @@ async fn auth_middleware(
     headers: header::HeaderMap, // get all headers
     mut request: Request<Body>, // incoming request
     next: Next,                 // next middleware or handler in the chain
-) -> Result<Response, AuthError> {
+) -> Result<Response, AppError> {
     // extract Authorization header
     let auth_header = headers.typed_get::<Authorization<Bearer>>();
 
     let token = match auth_header {
         Some(Authorization(bearer)) => bearer.token().to_string(),
-        None => return Err(AuthError::MissingToken), // No token found
+        None => return Err(AppError::MissingToken), // No token found
     };
 
     // decode and Validate JWT
@@ -620,8 +681,8 @@ async fn auth_middleware(
         Err(e) => {
             eprintln!("JWT decoding error: {}", e); // Log the specific error for debugging
             return match e.kind() {
-                jsonwebtoken::errors::ErrorKind::ExpiredSignature => Err(AuthError::ExpiredToken),
-                _ => Err(AuthError::InvalidToken), // Catch all other JWT errors as invalid
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => Err(AppError::ExpiredToken),
+                _ => Err(AppError::InvalidToken), // Catch all other JWT errors as invalid
             };
         }
     };
@@ -631,7 +692,7 @@ async fn auth_middleware(
         Ok(some_id) => some_id,
         Err(e) => {
             eprintln!("Invalid UUID in token subject: {}", e);
-            return Err(AuthError::InvalidToken); // Malformed user ID in token
+            return Err(AppError::InvalidToken); // Malformed user ID in token
         }
     };
     request.extensions_mut().insert(some_user_id); // Store the Uuid directly
@@ -692,20 +753,7 @@ async fn generate_password_handler(
 
 async fn get_connection(
     store: &AppState,
-) -> Result<
-    deadpool::managed::Object<AsyncDieselConnectionManager<AsyncPgConnection>>,
-    axum::http::Response<Body>,
-> {
-    match store.db_pool.get().await {
-        Ok(conn) => Ok(conn),
-        Err(e) => {
-            // Handle pool error
-            eprintln!("Failed to get DB connection from pool: {}", e);
-            return Err(Json(ApiError {
-                error: "ailed to get DB connection from pool".to_string(),
-                code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            })
-            .into_response());
-        }
-    }
+) -> Result<deadpool::managed::Object<AsyncDieselConnectionManager<AsyncPgConnection>>, AppError> {
+    // implemented From, so we can use ? operator for succint error handling
+    Ok(store.db_pool.get().await?)
 }

@@ -1,0 +1,13 @@
+{
+  "body": {
+    "content": "ewoidXNlcm5hbWUiOiAiaW9uIiwKInBhc3N3b3JkIjogImlvbiIKfQ==",
+    "file": false,
+    "fileSize": false
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "method": "POST",
+  "title": "New HTTP Request",
+  "url": "localhost:3000/register"
+}

@@ -5,7 +5,7 @@ use argon2::{PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::Query;
-use axum::http::{Request, header};
+use axum::http::{header, HeaderValue, Method, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::{
@@ -28,6 +28,7 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::types::uuid;
+use tower_http::cors::CorsLayer;
 
 use std::{borrow::Cow, env, net::SocketAddr, process};
 use tokio::net::TcpListener;
@@ -268,8 +269,16 @@ async fn main() {
     dotenv().ok();
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("listening on {}", addr);
+    // CORS rules - permissive setup for development
+    let cors = CorsLayer::new()
+        // Allow requests from your frontend's origin
+        .allow_origin("http://localhost:5173".parse::<HeaderValue>().unwrap())
+        // Allow these specific HTTP methods
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        // Allow these specific headers in requests
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
 
-    // Load environment variables
+    // Load env variables
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
 
@@ -303,7 +312,8 @@ async fn main() {
                     auth_middleware,
                 )),
         )
-        .with_state(app_state);
+        .with_state(app_state)
+        .layer(cors);
 
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

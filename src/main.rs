@@ -184,12 +184,12 @@ impl From<diesel::result::Error> for AppError {
             diesel::result::Error::NotFound => AppError::NotFound,
             diesel::result::Error::DatabaseError(
                 diesel::result::DatabaseErrorKind::UniqueViolation,
-                db_error_info,
+                _,
             ) => {
                 // We've identified a unique violation. Now we can create our Conflict error.
                 // We can even inspect `db_error_info` to get the specific constraint name
                 // if we want to be more specific (e.g., "Username already exists").
-                AppError::Conflict(db_error_info.message().to_string())
+                AppError::Conflict("An account with this name already exists.".to_string())
             }
             // All other database errors are still treated as internal server errors
             _ => AppError::DatabaseError(error),

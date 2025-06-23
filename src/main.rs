@@ -50,17 +50,7 @@ pub type DbPool = deadpool::managed::Pool<AsyncDieselConnectionManager<AsyncPgCo
 
 mod schema;
 
-#[derive(Deserialize, Serialize, Debug)]
-struct PasswordEntry {
-    key: String,
-    value: String,
-}
 
-#[derive(Deserialize, AsChangeset)]
-#[diesel(table_name = passwords)]
-struct PasswordEntryUpdate {
-    value: String,
-}
 
 #[derive(Clone)]
 struct AppState {
@@ -235,6 +225,7 @@ pub struct NewPassword<'a> {
     pub key: &'a str,
     pub value: &'a str,
     pub user_id: Uuid,
+    pub notes: Option<&'a str>
 }
 
 #[derive(Debug, Clone, PartialEq, Queryable, Insertable, Serialize)]
@@ -246,6 +237,7 @@ pub struct Password {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub user_id: Uuid,
+    pub notes: Option<String>
 }
 
 #[derive(Serialize)]
@@ -256,6 +248,20 @@ pub struct PasswordResponse {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub user_id: Uuid,
+    pub notes: Option<String>
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct PasswordEntry {
+    key: String,
+    value: String,
+}
+
+#[derive(Deserialize, AsChangeset)]
+#[diesel(table_name = passwords)]
+struct PasswordEntryUpdate {
+    value: String,
+    pub notes: Option<String>
 }
 
 #[derive(Deserialize, Debug)]
@@ -381,6 +387,7 @@ async fn create_password_handler(
         key: &payload.key,
         value: &payload.value,
         user_id: auth_user_id,
+        notes: None,
     };
 
     let created_pass = diesel::insert_into(passwords)
@@ -393,6 +400,7 @@ async fn create_password_handler(
         created_at: created_pass.created_at,
         updated_at: created_pass.updated_at,
         user_id: created_pass.user_id,
+        notes: None,
     };
     Ok((StatusCode::CREATED, Json(response_body)))
 }
@@ -469,6 +477,7 @@ async fn delete_password_handler(
         created_at: deleted_pass.created_at,
         updated_at: deleted_pass.updated_at,
         user_id: deleted_pass.user_id,
+        notes: deleted_pass.notes
     };
 
     Ok((StatusCode::OK, Json(response_body)))
@@ -505,6 +514,7 @@ async fn update_password_handler(
         created_at: updated_pass.created_at,
         updated_at: updated_pass.updated_at,
         user_id: updated_pass.user_id,
+        notes: updated_pass.notes
     };
 
     Ok((StatusCode::OK, Json(response_body)))
